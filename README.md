@@ -46,7 +46,7 @@ FH2VR hooks the Driver camera vtable update slot and calls whatever callback was
 ```powershell
 cmake -S . -B build -A x64
 cmake --build build --config Release --parallel
-cmake --install build --config Release --prefix package
+cmake --install build --config Release --prefix package --component FH2VR
 ```
 
 CMake fetches Valve OpenVR SDK **v2.15.6** at configure time. No OpenVR binaries are committed to this repository.
