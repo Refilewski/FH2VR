@@ -1,0 +1,39 @@
+name: Build FH2VR
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -A x64
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Verify manifest version
+        shell: pwsh
+        run: |
+          $manifest = Get-Content mod.json -Raw | ConvertFrom-Json
+          if ($manifest.version -ne '0.1.0') { throw "Unexpected mod version: $($manifest.version)" }
+          if ($manifest.entry -ne 'FH2VR.dll') { throw "Unexpected entry: $($manifest.entry)" }
+          if (-not (Test-Path 'build/Release/FH2VR.dll')) { throw 'FH2VR.dll was not produced' }
+
+      - name: Install package
+        run: cmake --install build --config Release --prefix package
+
+      - name: Upload FH2ML package
+        uses: actions/upload-artifact@v4
+        with:
+          name: FH2VR-0.1.0
+          path: package/
+          if-no-files-found: error
