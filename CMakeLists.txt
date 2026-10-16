@@ -28,5 +28,5 @@ target_compile_options(FH2VR PRIVATE /W4 /WX /EHsc /utf-8)
 target_link_libraries(FH2VR PRIVATE openvr_api64 user32)
 set_target_properties(FH2VR PROPERTIES OUTPUT_NAME FH2VR)
 
-install(TARGETS FH2VR RUNTIME DESTINATION .)
-install(FILES mod.json README.md THIRD_PARTY.md DESTINATION .)
+install(TARGETS FH2VR RUNTIME DESTINATION . COMPONENT FH2VR)
+install(FILES mod.json README.md THIRD_PARTY.md DESTINATION . COMPONENT FH2VR)
