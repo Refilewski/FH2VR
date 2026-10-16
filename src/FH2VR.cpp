@@ -12,7 +12,7 @@
 
 namespace {
 constexpr char kModId[] = "fh2vr";
-constexpr char kVersion[] = "0.1.0";
+constexpr char kVersion[] = "0.1.1-dev";
 
 // Forza Horizon 2 Xbox One 1.0.0.64 camera layout, confirmed against the
 // camera hooks used by ForzaHorizon2_ExtraOptions.
@@ -22,6 +22,9 @@ constexpr uintptr_t kCameraHeadingOffset = 0x1C0;
 constexpr uintptr_t kCameraViewDirtyOffset = 0x21A;
 constexpr float kPi = 3.14159265358979323846f;
 constexpr float kPitchLimit = 1.39626340159546366154f; // 80 degrees
+constexpr float kMockYawSpeed = kPi / 2.0f;            // 90 degrees / second
+constexpr float kMockPitchSpeed = 1.30899693899574718269f; // 75 degrees / second
+constexpr ULONGLONG kVrRetryMs = 2000;
 
 using CameraUpdate = void (*)(void *camera, float dt, unsigned char reset);
 
@@ -29,6 +32,7 @@ const FH2ML_HostAPI *g_api = nullptr;
 CameraUpdate g_originalCameraUpdate = nullptr;
 std::atomic<bool> g_stop{false};
 std::atomic<bool> g_trackingEnabled{true};
+std::atomic<bool> g_mockMode{false};
 std::atomic<bool> g_poseValid{false};
 std::atomic<bool> g_recenterRequested{true};
 std::atomic<float> g_yaw{0.0f};
@@ -57,6 +61,10 @@ bool key_pressed(int virtualKey, bool &wasDown) {
     return pressed;
 }
 
+bool key_down(int virtualKey) {
+    return (GetAsyncKeyState(virtualKey) & 0x8000) != 0;
+}
+
 bool write_memory(void *address, const void *data, size_t size) {
     DWORD oldProtection = 0;
     if (!VirtualProtect(address, size, PAGE_READWRITE, &oldProtection)) {
@@ -80,7 +88,7 @@ void apply_head_look(float forward[4], float yaw, float pitch) {
     forward[2] = yawCosine * originalZ - yawSine * originalX;
 
     // Pitch around the camera-local right axis. Roll is deliberately not part
-    // of the 0.1 prototype because the confirmed FH2 layout exposes a forward
+    // of the prototype because the confirmed FH2 layout exposes a forward
     // vector here, not the complete camera basis.
     const float horizontal = std::sqrt(forward[0] * forward[0] + forward[2] * forward[2]);
     if (horizontal < 0.0001f) {
@@ -157,69 +165,148 @@ void publish_pose(const vr::HmdMatrix34_t &matrix, float &referenceYaw, float &r
     g_yaw.store(wrap_angle(yaw - referenceYaw), std::memory_order_relaxed);
     g_pitch.store(std::clamp(pitch - referencePitch, -kPitchLimit, kPitchLimit),
                   std::memory_order_relaxed);
-    g_poseValid.store(true, std::memory_order_release);
+    g_poseValid.store(g_trackingEnabled.load(std::memory_order_relaxed), std::memory_order_release);
+}
+
+void reset_mock_pose() {
+    g_yaw.store(0.0f, std::memory_order_relaxed);
+    g_pitch.store(0.0f, std::memory_order_relaxed);
+    g_poseValid.store(g_trackingEnabled.load(std::memory_order_relaxed), std::memory_order_release);
+}
+
+void update_mock_pose(float deltaSeconds) {
+    float yaw = g_yaw.load(std::memory_order_relaxed);
+    float pitch = g_pitch.load(std::memory_order_relaxed);
+
+    if (key_down(VK_LEFT)) {
+        yaw -= kMockYawSpeed * deltaSeconds;
+    }
+    if (key_down(VK_RIGHT)) {
+        yaw += kMockYawSpeed * deltaSeconds;
+    }
+    if (key_down(VK_UP)) {
+        pitch += kMockPitchSpeed * deltaSeconds;
+    }
+    if (key_down(VK_DOWN)) {
+        pitch -= kMockPitchSpeed * deltaSeconds;
+    }
+
+    g_yaw.store(wrap_angle(yaw), std::memory_order_relaxed);
+    g_pitch.store(std::clamp(pitch, -kPitchLimit, kPitchLimit), std::memory_order_relaxed);
+    g_poseValid.store(g_trackingEnabled.load(std::memory_order_relaxed), std::memory_order_release);
 }
 
 DWORD WINAPI tracking_thread(void *) {
+    bool f6WasDown = false;
     bool f7WasDown = false;
     bool f8WasDown = false;
     std::string lastInitError;
+    vr::IVRSystem *system = nullptr;
+    ULONGLONG nextVrRetryAt = 0;
+    ULONGLONG previousTick = GetTickCount64();
+    float referenceYaw = 0.0f;
+    float referencePitch = 0.0f;
+    bool hasReference = false;
 
     while (!g_stop.load(std::memory_order_relaxed)) {
-        vr::EVRInitError initError = vr::VRInitError_None;
-        vr::IVRSystem *system = vr::VR_Init(&initError, vr::VRApplication_Background);
-        if (!system || initError != vr::VRInitError_None) {
-            const char *description = vr::VR_GetVRInitErrorAsEnglishDescription(initError);
-            const std::string error = description ? description : "unknown OpenVR error";
-            if (error != lastInitError) {
-                log_message("SteamVR/OpenVR unavailable: " + error + "; retrying");
-                lastInitError = error;
+        const ULONGLONG now = GetTickCount64();
+        const ULONGLONG elapsedMs = now - previousTick;
+        previousTick = now;
+        const float deltaSeconds = std::clamp(static_cast<float>(elapsedMs) / 1000.0f, 0.0f, 0.05f);
+
+        if (key_pressed(VK_F6, f6WasDown)) {
+            const bool mock = !g_mockMode.load(std::memory_order_relaxed);
+            g_mockMode.store(mock, std::memory_order_relaxed);
+            g_poseValid.store(false, std::memory_order_release);
+
+            if (mock) {
+                if (system) {
+                    vr::VR_Shutdown();
+                    system = nullptr;
+                }
+                hasReference = false;
+                reset_mock_pose();
+                log_message("Mock head tracking enabled; arrow keys control yaw/pitch, F8 recenters");
+            } else {
+                g_recenterRequested.store(true, std::memory_order_relaxed);
+                nextVrRetryAt = 0;
+                log_message("Mock head tracking disabled; returning to SteamVR/OpenVR");
             }
-            for (int i = 0; i < 100 && !g_stop.load(std::memory_order_relaxed); ++i) {
-                Sleep(20);
+        }
+
+        if (key_pressed(VK_F7, f7WasDown)) {
+            const bool enabled = !g_trackingEnabled.load(std::memory_order_relaxed);
+            g_trackingEnabled.store(enabled, std::memory_order_relaxed);
+            g_poseValid.store(false, std::memory_order_release);
+            if (enabled) {
+                if (g_mockMode.load(std::memory_order_relaxed)) {
+                    g_poseValid.store(true, std::memory_order_release);
+                } else {
+                    g_recenterRequested.store(true, std::memory_order_relaxed);
+                }
             }
+            log_message(enabled ? "Head tracking enabled" : "Head tracking disabled");
+        }
+
+        if (key_pressed(VK_F8, f8WasDown)) {
+            if (g_mockMode.load(std::memory_order_relaxed)) {
+                reset_mock_pose();
+                log_message("Mock head pose recentered");
+            } else {
+                g_recenterRequested.store(true, std::memory_order_relaxed);
+            }
+        }
+
+        if (g_mockMode.load(std::memory_order_relaxed)) {
+            update_mock_pose(deltaSeconds);
+            Sleep(4);
             continue;
         }
 
-        lastInitError.clear();
-        log_message("SteamVR/OpenVR tracking connected; F7 toggles tracking, F8 recenters");
-        g_recenterRequested.store(true, std::memory_order_relaxed);
-
-        float referenceYaw = 0.0f;
-        float referencePitch = 0.0f;
-        bool hasReference = false;
-
-        while (!g_stop.load(std::memory_order_relaxed)) {
-            if (key_pressed(VK_F7, f7WasDown)) {
-                const bool enabled = !g_trackingEnabled.load(std::memory_order_relaxed);
-                g_trackingEnabled.store(enabled, std::memory_order_relaxed);
-                g_poseValid.store(false, std::memory_order_release);
-                if (enabled) {
+        if (!system) {
+            if (now >= nextVrRetryAt) {
+                vr::EVRInitError initError = vr::VRInitError_None;
+                system = vr::VR_Init(&initError, vr::VRApplication_Background);
+                if (!system || initError != vr::VRInitError_None) {
+                    system = nullptr;
+                    const char *description = vr::VR_GetVRInitErrorAsEnglishDescription(initError);
+                    const std::string error = description ? description : "unknown OpenVR error";
+                    if (error != lastInitError) {
+                        log_message("SteamVR/OpenVR unavailable: " + error + "; F6 enables keyboard mock mode");
+                        lastInitError = error;
+                    }
+                    nextVrRetryAt = now + kVrRetryMs;
+                } else {
+                    lastInitError.clear();
+                    hasReference = false;
                     g_recenterRequested.store(true, std::memory_order_relaxed);
+                    log_message("SteamVR/OpenVR tracking connected; F6 mock, F7 toggle, F8 recenter");
                 }
-                log_message(enabled ? "Head tracking enabled" : "Head tracking disabled");
-            }
-            if (key_pressed(VK_F8, f8WasDown)) {
-                g_recenterRequested.store(true, std::memory_order_relaxed);
             }
 
-            vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount]{};
-            system->GetDeviceToAbsoluteTrackingPose(vr::TrackingUniverseSeated, 0.0f, poses,
-                                                    vr::k_unMaxTrackedDeviceCount);
-            const vr::TrackedDevicePose_t &hmd = poses[vr::k_unTrackedDeviceIndex_Hmd];
-            if (hmd.bDeviceIsConnected && hmd.bPoseIsValid) {
-                publish_pose(hmd.mDeviceToAbsoluteTracking, referenceYaw, referencePitch, hasReference);
-            } else {
-                g_poseValid.store(false, std::memory_order_release);
+            if (!system) {
+                Sleep(4);
+                continue;
             }
-
-            Sleep(4);
         }
 
-        g_poseValid.store(false, std::memory_order_release);
-        vr::VR_Shutdown();
+        vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount]{};
+        system->GetDeviceToAbsoluteTrackingPose(vr::TrackingUniverseSeated, 0.0f, poses,
+                                                vr::k_unMaxTrackedDeviceCount);
+        const vr::TrackedDevicePose_t &hmd = poses[vr::k_unTrackedDeviceIndex_Hmd];
+        if (hmd.bDeviceIsConnected && hmd.bPoseIsValid) {
+            publish_pose(hmd.mDeviceToAbsoluteTracking, referenceYaw, referencePitch, hasReference);
+        } else {
+            g_poseValid.store(false, std::memory_order_release);
+        }
+
+        Sleep(4);
     }
 
+    g_poseValid.store(false, std::memory_order_release);
+    if (system) {
+        vr::VR_Shutdown();
+    }
     return 0;
 }
 
@@ -297,7 +384,7 @@ extern "C" __declspec(dllexport) int FH2ML_Initialize(const FH2ML_HostAPI *api) 
 
     HANDLE thread = CreateThread(nullptr, 0, tracking_thread, nullptr, 0, nullptr);
     if (!thread) {
-        log_message("Failed to create SteamVR tracking worker");
+        log_message("Failed to create tracking worker");
         if (!restore_camera_hook(gameBase)) {
             log_message("WARNING: camera hook restore failed after worker startup failure");
         }
@@ -305,7 +392,7 @@ extern "C" __declspec(dllexport) int FH2ML_Initialize(const FH2ML_HostAPI *api) 
     }
     CloseHandle(thread);
 
-    log_message("FH2VR 0.1.0 initialized: cockpit head-look prototype active");
+    log_message("FH2VR 0.1.1-dev initialized: F6 keyboard mock, F7 toggle, F8 recenter");
     return 1;
 }
 
