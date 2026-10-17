@@ -4,6 +4,7 @@
 #include <windows.h>
 #include <wrl/client.h>
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <utility>
@@ -12,12 +13,13 @@ namespace fh2vr {
 namespace {
 using Microsoft::WRL::ComPtr;
 
-constexpr ULONGLONG kCaptureIntervalMs = 16; // ~60 FPS max for the GDI mono preview.
+constexpr ULONGLONG kCaptureIntervalMs = 16; // ~60 FPS max for the temporary GDI path.
 
 struct PreviewState {
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
-    ComPtr<ID3D11Texture2D> texture;
+    std::array<ComPtr<ID3D11Texture2D>, 2> eyeTextures;
+    std::array<bool, 2> eyeHasFrame{false, false};
     HDC memoryDc = nullptr;
     HBITMAP bitmap = nullptr;
     HGDIOBJ previousBitmap = nullptr;
@@ -26,7 +28,6 @@ struct PreviewState {
     int width = 0;
     int height = 0;
     ULONGLONG lastCaptureAt = 0;
-    bool hasFrame = false;
 };
 
 PreviewState g_preview;
@@ -74,7 +75,10 @@ HWND find_game_window() {
 }
 
 void release_capture_resources() {
-    g_preview.texture.Reset();
+    for (auto &texture : g_preview.eyeTextures) {
+        texture.Reset();
+    }
+    g_preview.eyeHasFrame = {false, false};
 
     if (g_preview.memoryDc && g_preview.previousBitmap) {
         SelectObject(g_preview.memoryDc, g_preview.previousBitmap);
@@ -92,7 +96,7 @@ void release_capture_resources() {
     g_preview.pixels = nullptr;
     g_preview.width = 0;
     g_preview.height = 0;
-    g_preview.hasFrame = false;
+    g_preview.lastCaptureAt = 0;
 }
 
 bool ensure_device(std::string &error) {
@@ -119,8 +123,8 @@ bool ensure_capture_resources(int width, int height, std::string &error) {
         error = "game client area has an invalid size";
         return false;
     }
-    if (g_preview.texture && g_preview.bitmap && g_preview.memoryDc && g_preview.width == width &&
-        g_preview.height == height) {
+    if (g_preview.eyeTextures[0] && g_preview.eyeTextures[1] && g_preview.bitmap &&
+        g_preview.memoryDc && g_preview.width == width && g_preview.height == height) {
         return true;
     }
 
@@ -165,22 +169,29 @@ bool ensure_capture_resources(int width, int height, std::string &error) {
     textureDesc.Usage = D3D11_USAGE_DEFAULT;
     textureDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
 
-    const HRESULT result = g_preview.device->CreateTexture2D(&textureDesc, nullptr,
-                                                              g_preview.texture.GetAddressOf());
-    if (FAILED(result)) {
-        error = hresult_error("CreateTexture2D", result);
-        release_capture_resources();
-        return false;
+    for (auto &texture : g_preview.eyeTextures) {
+        const HRESULT result = g_preview.device->CreateTexture2D(&textureDesc, nullptr,
+                                                                  texture.GetAddressOf());
+        if (FAILED(result)) {
+            error = hresult_error("CreateTexture2D", result);
+            release_capture_resources();
+            return false;
+        }
     }
 
     g_preview.width = width;
     g_preview.height = height;
     g_preview.lastCaptureAt = 0;
-    g_preview.hasFrame = false;
+    g_preview.eyeHasFrame = {false, false};
     return true;
 }
 
-bool capture_game_client(std::string &error) {
+bool capture_game_client(int eyeIndex, std::string &error) {
+    if (eyeIndex < 0 || eyeIndex > 1) {
+        error = "invalid eye index";
+        return false;
+    }
+
     if (!g_preview.window || !IsWindow(g_preview.window) || !IsWindowVisible(g_preview.window) ||
         IsIconic(g_preview.window)) {
         g_preview.window = find_game_window();
@@ -222,9 +233,9 @@ bool capture_game_client(std::string &error) {
         return false;
     }
 
-    g_preview.context->UpdateSubresource(g_preview.texture.Get(), 0, nullptr, g_preview.pixels,
-                                         static_cast<UINT>(width * 4), 0);
-    g_preview.hasFrame = true;
+    g_preview.context->UpdateSubresource(g_preview.eyeTextures[eyeIndex].Get(), 0, nullptr,
+                                         g_preview.pixels, static_cast<UINT>(width * 4), 0);
+    g_preview.eyeHasFrame[eyeIndex] = true;
     return true;
 }
 
@@ -247,9 +258,6 @@ vr::VRTextureBounds_t aspect_correct_bounds() {
     const float eyeAspect =
         static_cast<float>(recommendedWidth) / static_cast<float>(recommendedHeight);
 
-    // OpenVR maps the submitted bounds across the full eye surface. A normal FH2
-    // window is much wider than one VR eye, so submitting the full 16:9 texture
-    // squeezes it horizontally. Center-crop the source to the HMD eye aspect instead.
     if (sourceAspect > eyeAspect) {
         const float visibleWidth = eyeAspect / sourceAspect;
         const float margin = (1.0f - visibleWidth) * 0.5f;
@@ -271,7 +279,8 @@ std::string compositor_error(const char *eye, vr::EVRCompositorError result) {
 }
 } // namespace
 
-bool submit_mono_headset_preview(vr::IVRCompositor *compositor, std::string &error) {
+bool submit_headset_preview(vr::IVRCompositor *compositor, bool alternatingEyes, int sourceEye,
+                            std::string &error) {
     if (!compositor) {
         error = "OpenVR compositor is unavailable";
         return false;
@@ -281,27 +290,43 @@ bool submit_mono_headset_preview(vr::IVRCompositor *compositor, std::string &err
     }
 
     const ULONGLONG now = GetTickCount64();
-    if (!g_preview.hasFrame || now - g_preview.lastCaptureAt >= kCaptureIntervalMs) {
-        if (!capture_game_client(error)) {
+    if (now - g_preview.lastCaptureAt >= kCaptureIntervalMs ||
+        (!g_preview.eyeHasFrame[0] && !g_preview.eyeHasFrame[1])) {
+        const int captureEye = alternatingEyes ? (sourceEye & 1) : 0;
+        if (!capture_game_client(captureEye, error)) {
             return false;
         }
         g_preview.lastCaptureAt = now;
     }
 
-    vr::Texture_t texture{g_preview.texture.Get(), vr::TextureType_DirectX, vr::ColorSpace_Gamma};
     const vr::VRTextureBounds_t bounds = aspect_correct_bounds();
 
-    const vr::EVRCompositorError left =
-        compositor->Submit(vr::Eye_Left, &texture, &bounds, vr::Submit_Default);
-    if (left != vr::VRCompositorError_None) {
-        error = compositor_error("left", left);
+    ID3D11Texture2D *leftTexture = g_preview.eyeTextures[0].Get();
+    ID3D11Texture2D *rightTexture = alternatingEyes ? g_preview.eyeTextures[1].Get() : leftTexture;
+
+    if (alternatingEyes) {
+        if (!g_preview.eyeHasFrame[0] && g_preview.eyeHasFrame[1]) {
+            leftTexture = g_preview.eyeTextures[1].Get();
+        }
+        if (!g_preview.eyeHasFrame[1] && g_preview.eyeHasFrame[0]) {
+            rightTexture = g_preview.eyeTextures[0].Get();
+        }
+    }
+
+    vr::Texture_t left{leftTexture, vr::TextureType_DirectX, vr::ColorSpace_Gamma};
+    vr::Texture_t right{rightTexture, vr::TextureType_DirectX, vr::ColorSpace_Gamma};
+
+    const vr::EVRCompositorError leftResult =
+        compositor->Submit(vr::Eye_Left, &left, &bounds, vr::Submit_Default);
+    if (leftResult != vr::VRCompositorError_None) {
+        error = compositor_error("left", leftResult);
         return false;
     }
 
-    const vr::EVRCompositorError right =
-        compositor->Submit(vr::Eye_Right, &texture, &bounds, vr::Submit_Default);
-    if (right != vr::VRCompositorError_None) {
-        error = compositor_error("right", right);
+    const vr::EVRCompositorError rightResult =
+        compositor->Submit(vr::Eye_Right, &right, &bounds, vr::Submit_Default);
+    if (rightResult != vr::VRCompositorError_None) {
+        error = compositor_error("right", rightResult);
         return false;
     }
 
@@ -310,12 +335,11 @@ bool submit_mono_headset_preview(vr::IVRCompositor *compositor, std::string &err
     return true;
 }
 
-void shutdown_mono_headset_preview() {
+void shutdown_headset_preview() {
     release_capture_resources();
     g_preview.context.Reset();
     g_preview.device.Reset();
     g_preview.window = nullptr;
-    g_preview.lastCaptureAt = 0;
 }
 
 } // namespace fh2vr
