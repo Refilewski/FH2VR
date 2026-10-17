@@ -12,6 +12,12 @@ namespace fh2vr {
 // swaps only the final compositor assignment, making F11 a real L/R diagnostic.
 bool submit_headset_preview(vr::IVRCompositor *compositor, bool alternatingEyes, int sourceEye,
                             bool swapEyes, std::string &error);
+
+// Returns the mean absolute RGB difference between small CPU-side samples of
+// the latest retained left/right captures. Intended only as a diagnostic: with
+// motion, temporal differences can raise this value even without stereo.
+bool get_headset_preview_mean_diff(double &meanDiff);
+
 void shutdown_headset_preview();
 
 } // namespace fh2vr
