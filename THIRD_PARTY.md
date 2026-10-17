@@ -18,7 +18,7 @@ OpenVR is distributed by Valve under the BSD 3-Clause license.
 
 ## MinHook
 
-FH2VR builds against MinHook v1.3.4 for the current renderer hooks. CMake fetches MinHook at configure time; MinHook source is not committed to this repository.
+FH2VR builds against MinHook v1.3.4 for the renderer hooks. CMake fetches MinHook at configure time; MinHook source is not committed to this repository.
 
 The packaged FH2VR artifact includes the complete upstream MinHook/HDE notices and license text at:
 
