@@ -1,139 +1,139 @@
-# FH2VR
+<h1 align="center">FH2VR</h1>
 
-Experimental VR mod for **Forza Horizon 2 Xbox One 1.0.0.64 running through Azimuth**.
+<p align="center">
+  Experimental VR support for <strong>Forza Horizon 2 on Azimuth</strong>.<br />
+  Adds headset look tracking, positional head movement, SteamVR output and a VR-friendly GUI path to the Xbox One version of FH2 running on PC.
+</p>
 
-FH2VR can be used in two ways:
+<p align="center">
+  <a href="https://github.com/Refilewski/FH2VR/releases/tag/dev-latest"><img src="https://img.shields.io/badge/Download-Development%20build-5865F2?style=for-the-badge&logo=github" alt="Download development build" /></a>
+  <a href="https://github.com/Refilewski/FH2VR/issues"><img src="https://img.shields.io/badge/Report-Issue-d73a4a?style=for-the-badge&logo=github" alt="Report an issue" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Source--available-2ea44f?style=for-the-badge" alt="Source-available license" /></a>
+</p>
 
-- **Standalone** — a single `FH2VR.exe` watches for `azimuth.exe`, extracts its embedded native runtime to `%LOCALAPPDATA%\FH2VR\runtime\<sha256>\FH2VR.dll`, and attaches automatically. FH2ML is not required and Azimuth helper files are not replaced.
-- **FH2ML** — `FH2VR.dll` can still be installed as a normal FH2ML mod.
+> [!WARNING]
+> FH2VR is experimental software. The current renderer is still mono and positional movement is an approximation rather than true geometric stereo. Expect bugs, visual artifacts and compatibility issues while the project is in development.
 
-## Current status: 0.4.0-dev
+## Features
 
-Confirmed live on Quest 3 / SteamVR / wired Meta Link:
+- VR output through SteamVR / OpenVR.
+- Head-tracked yaw and pitch in the FH2 Driver camera.
+- Roll-neutral world rendering so leaning your head does not tilt the car/world.
+- Experimental positional head movement for leaning left/right/up/down/forward/back.
+- FH2 camera FOV matched to the headset projection.
+- Automatic handling for Pause Menu, Photo Mode, World Map, Horizon Hub, Garage and Loading.
+- Flat VR GUI/menu overlay with frozen gameplay behind automatically detected menus.
+- Automatic OpenVR reconnect after temporary headset / SteamVR disconnects.
+- Two installation modes: a standalone Windows app or an FH2ML mod.
+- Standalone mode does not replace `azimuth-tls.dll` and does not require FH2ML.
 
-- native FH2 D3D12 backbuffer capture;
-- GPU conversion from `R10G10B10A2_UNORM` to OpenVR-friendly `R8G8B8A8_UNORM`;
-- per-eye OpenVR projection bounds from `GetProjectionRaw()`;
-- FH2 Driver-camera FOV matched to the Quest frustum;
-- yaw/pitch head tracking in the FH2 camera;
-- roll-neutral compositor pose so the world does not tilt with your head;
-- stable-frame pose reprojection;
-- automatic flat GUI/menu overlay using FH2 UI-state detection ported from Azimuth-RPC;
-- resilient overlay recreation after OpenVR restarts;
-- frozen gameplay frame behind automatically detected menus to avoid the old menu-on-menu duplication;
-- standalone attach path without replacing `azimuth-tls.dll`.
+## Compatibility
 
-### M10 — positional parallax
+FH2VR currently targets:
 
-The current development renderer adds an experimental positional-head-movement layer. Headset X/Y/Z translation relative to the initial VR pose shifts and slightly scales the source frustum, so leaning left/right/up/down/forward/back produces a positional parallax response instead of rotation-only tracking.
+- **Forza Horizon 2 Xbox One 1.0.0.64**
+- **Azimuth on Windows x64**
+- **SteamVR / OpenVR**
+- a D3D12-capable GPU
+- a tracked VR headset
 
-This is deliberately conservative and does **not** pretend to be true depth-based stereo. FH2 is still rendered as one mono scene; M10 approximates positional 6DoF until a real scene-depth/stereo path exists.
+The main test setup is currently **Meta Quest 3 over wired Meta Link + SteamVR**.
 
-## Controls
+Other SteamVR-compatible headsets may work, but are not yet confirmed.
 
-FH2VR intentionally exposes only two keys:
+Unknown FH2 builds are not supported.
 
-- **F1** — VR ON/OFF. Enabling VR also enables head tracking and automatically recenters the current head pose.
-- **F2** — manual HUD/GUI flat overlay ON/OFF. Automatic menu/map/garage/loading detection works independently.
+## Download & install
 
-The old F5-F12/debug controls, mock tracking, arrow-key camera controls, manual tracking disable and AER diagnostics are gone from the user keyboard path.
+Download the newest development build from:
 
-## GUI behavior
+**[FH2VR Development Release](https://github.com/Refilewski/FH2VR/releases/tag/dev-latest)**
 
-Normal gameplay:
+Two packages are published automatically.
 
-```text
-FH2 world -> full VR scene
-```
-
-When FH2VR detects Pause Menu, Photo Mode, World Map, Horizon Hub, Garage or Loading:
-
-```text
-last gameplay frame -> VR background
-current FH2 frame   -> flat 16:9 menu overlay
-```
-
-**F2** can force the flat overlay manually, which is useful for the live HUD/minimap while the VR scene remains behind it.
-
-The overlay still receives FH2's final composite backbuffer rather than a dedicated UI-only render target.
-
-## Renderer pipeline
-
-```text
-FH2 D3D12 backbuffer (R10G10B10A2)
-        |
-        v
-captured DIRECT queue / Present
-        |
-        v
-retained D3D12 source texture
-        |
-        v
-GPU compute conversion
-R10G10B10A2 -> R8G8B8A8
-        |
-        v
-projection + FOV match
-        |
-        v
-M10 HMD X/Y/Z parallax shift/scale
-        |
-        v
-OpenVR DirectX12 Submit_TextureWithPose
-        |
-        v
-SteamVR / Quest 3
-```
-
-## Requirements
-
-- Windows x64
-- Azimuth
-- Forza Horizon 2 build 1.0.0.64
-- SteamVR/OpenVR
-- D3D12-capable GPU
-- tracked HMD
-
-FH2ML is required only for the FH2ML package, not for standalone.
-
-Current live target: **Meta Quest 3 over wired Quest Link**.
-
-## Install — standalone
-
-Download the GitHub Actions artifact:
-
-```text
-FH2VR-Standalone-0.4.0-dev
-```
-
-The standalone runtime is embedded in `FH2VR.exe`. There is no `Payload/FH2VR.dll` to keep next to it.
-
-Run `FH2VR.exe`, then start Azimuth normally. FH2VR automatically detects `azimuth.exe`, attaches, and waits for the supported FH2 image before initializing the VR runtime.
-
-The tray menu is intentionally minimal:
-
-```text
-FH2VR 0.4.0-dev
-<status>
-----------------
-Exit
-```
-
-Standalone does **not** replace `azimuth-tls.dll`, install a helper, create a `mods` entry, or require FH2ML.
-
-Once FH2 is ready, press **F1** to enable VR. **F2** manually toggles the flat HUD/GUI overlay.
-
-## Install — FH2ML
+### Standalone
 
 Download:
 
 ```text
-FH2VR-0.4.0-dev
+FH2VR-Standalone-dev-latest.zip
 ```
 
-Install it as a normal FH2ML mod. Do not keep multiple installed copies with the same `fh2vr` mod ID.
+Then:
 
-## Build
+1. Extract the ZIP anywhere outside the Azimuth game folder.
+2. Run `FH2VR.exe`.
+3. Start Azimuth and Forza Horizon 2 normally.
+4. FH2VR detects `azimuth.exe` and attaches automatically.
+5. Once FH2 is running, press **F1** to enable VR.
+
+The standalone build is a single EXE with the native FH2VR runtime embedded inside it. At runtime it extracts a private copy under `%LOCALAPPDATA%\FH2VR\runtime\...` and uses that copy without replacing Azimuth helper files.
+
+### FH2ML
+
+Download:
+
+```text
+FH2VR-FH2ML-dev-latest.zip
+```
+
+Install it as a normal FH2ML mod.
+
+Do **not** run the standalone EXE and the FH2ML build at the same time. Use one FH2VR runtime path per Azimuth process.
+
+## Controls
+
+| Key | Action |
+| --- | --- |
+| **F1** | Toggle VR on/off. Enabling VR recenters the current headset pose. |
+| **F2** | Toggle the manual flat GUI/HUD overlay. |
+
+Automatic menu/map/garage/loading handling works independently of F2.
+
+## How the current renderer works
+
+FH2VR captures FH2's native D3D12 backbuffer, converts it on the GPU to an OpenVR-compatible texture, adjusts the projection/FOV for the headset and submits the result to SteamVR.
+
+The current development renderer also adds positional head movement by shifting/scaling the rendered source according to headset X/Y/Z movement.
+
+This makes leaning in the cockpit feel more responsive, but it is still a **mono approximation**. Nearby and distant objects do not yet move independently as they would with true depth-aware reprojection or native stereo rendering.
+
+## Current limitations
+
+- The game scene is still rendered as one mono image rather than true stereo geometry.
+- Positional head movement is screen/frustum based, not depth-aware.
+- Large head translations are limited by the available source image/FOV margin.
+- The flat GUI path uses FH2's final composite frame rather than a dedicated UI-only render target.
+- Compatibility with other FH2 camera/rendering mods is still being tested.
+- Disconnect/reconnect recovery is experimental.
+
+If something looks wrong, disable VR with **F1** before restarting SteamVR or Azimuth.
+
+## Reporting issues
+
+When opening an issue, include:
+
+- headset model;
+- connection method (Meta Link, Steam Link, Virtual Desktop, native SteamVR, etc.);
+- GPU;
+- Azimuth version;
+- whether you use standalone or FH2ML;
+- other FH2 mods that are active;
+- what you were doing when the problem happened;
+- whether restarting SteamVR, FH2VR or Azimuth changes the result.
+
+Useful symptoms include wrong head-tracking direction, image stretching, flicker, frozen SteamVR view, GUI overlay problems, reconnect failures or crashes.
+
+Do not upload copyrighted game files, DLC, license keys or full game memory dumps.
+
+## Build from source
+
+Requirements:
+
+- Windows x64
+- Visual Studio Build Tools with C++ support
+- CMake
+- .NET 8 SDK for the standalone launcher
 
 Native runtime / FH2ML package:
 
@@ -143,7 +143,7 @@ cmake --build build --config Release --parallel
 cmake --install build --config Release --prefix package --component FH2VR
 ```
 
-Standalone single-EXE build stages the native runtime as an embedded resource before publishing:
+Standalone:
 
 ```powershell
 New-Item -ItemType Directory -Force standalone/Embedded
@@ -151,15 +151,26 @@ Copy-Item build/Release/FH2VR.dll standalone/Embedded/FH2VR.dll
 dotnet publish standalone/FH2VR.Standalone.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true
 ```
 
-Dependencies fetched by CMake:
+GitHub Actions builds and validates both packages automatically. Development releases are published under the moving `dev-latest` tag; version tags such as `v0.4.0` can publish normal versioned releases.
 
-- Valve OpenVR SDK `v2.15.6`
-- MinHook `v1.3.4`
+## Third-party components
 
-Their upstream license files are packaged under `licenses/`.
+FH2VR uses:
 
-## Remaining renderer limits
+- Valve OpenVR SDK
+- MinHook
+- the FH2ML SDK header for the FH2ML package
 
-- scene rendering is still mono rather than true geometric stereo;
-- M10 positional parallax is screen/frustum based, not depth-aware;
-- the flat GUI uses the final FH2 composite rather than an isolated HUD/frontend target.
+Their licensing information is documented in [THIRD_PARTY.md](THIRD_PARTY.md) and the upstream license files are included with packaged builds where required.
+
+## License
+
+FH2VR is **source-available**, not OSI open source.
+
+The [FH2VR Use-Only License 1.0](LICENSE) permits inspection, local compilation and personal use. Redistribution, publishing modified builds, incorporating FH2VR code into another project or distributing derivative implementations requires separate permission from Refilewski.
+
+## Disclaimer
+
+FH2VR is an independent fan project by **Refilewski**. It is not affiliated with or endorsed by Microsoft, Xbox, Playground Games, Turn 10, Valve, Meta or Azimuth.
+
+No game, DLC, game executable, license key or other copyrighted Forza Horizon 2 content is included in this repository or its releases.
