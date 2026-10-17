@@ -1,0 +1,29 @@
+FH2VR Use-Only License 1.0
+
+Copyright (c) 2026 Refilewski. All rights reserved except for the permissions expressly granted below.
+
+1. Scope
+This license applies only to FH2VR code and documentation for which Refilewski controls the relevant rights. It does not grant rights to Forza Horizon 2, Azimuth, SteamVR, OpenVR, Meta software, operating-system components, frameworks, SDKs or other third-party material. Those components remain subject to their own owners, notices and licenses.
+
+2. Personal use permission
+You may obtain, inspect, install, compile and run FH2VR for your own lawful personal use without paying a fee. You may make the local copies and backups reasonably needed for those activities and may change local configuration or build settings for your own use. Copies made under this permission must keep this license and any applicable third-party notices.
+
+3. Rights not granted
+Except for the permission in section 2 and rights that cannot lawfully be restricted, no permission is granted to republish, redistribute, sell, sublicense, transfer or otherwise provide FH2VR source code or compiled builds to other people.
+
+No permission is granted to incorporate FH2VR code, in whole or in part, into another project, to publish modified versions, to distribute derivative implementations, or to present FH2VR or a derivative as another project without separate written permission from Refilewski. Attribution by itself does not grant any additional permission.
+
+4. Public hosting
+Nothing in this license limits permissions that must remain available under applicable law or rights already granted by a third-party rights holder. If this repository is publicly hosted on GitHub, permissions required by GitHub's applicable Terms of Service, including normal viewing and service-provided forking functionality, remain unaffected.
+
+Those hosting permissions do not create a general license to reuse, republish or redistribute FH2VR outside their required scope. Technical access to source code is not an additional license grant.
+
+5. No warranty
+FH2VR is provided as available, without warranties or promises regarding accuracy, compatibility, security, reliability, availability, performance or fitness for a particular purpose.
+
+To the maximum extent permitted by law, the rights holder is not liable for losses or damage arising from obtaining, building, installing or using FH2VR. Mandatory statutory rights remain unaffected.
+
+6. Compliance
+The permissions granted in section 2 depend on compliance with this license. If you violate its conditions, those permissions end. Any other rights and remedies available under applicable law remain unaffected.
+
+This is a restrictive, source-available license. It is not an open-source license.
