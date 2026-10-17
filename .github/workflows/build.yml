@@ -2,10 +2,17 @@ name: Build FH2VR
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      - feature/present-probe-0.4.0-dev
+    tags:
+      - 'v*'
   pull_request:
     branches: [main]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -13,6 +20,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Configure native runtime
         run: cmake -S . -B build -A x64
@@ -114,3 +123,87 @@ jobs:
           name: FH2VR-Standalone-0.4.0-dev
           path: standalone-package/
           if-no-files-found: error
+
+      - name: Create release ZIPs
+        if: github.event_name == 'push'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path 'release-assets' | Out-Null
+
+          if ($env:GITHUB_REF -like 'refs/tags/*') {
+            $label = $env:GITHUB_REF_NAME
+          } else {
+            $label = 'dev-latest'
+          }
+
+          Compress-Archive -Path 'standalone-package/*' `
+            -DestinationPath "release-assets/FH2VR-Standalone-$label.zip" -Force
+          Compress-Archive -Path 'package/*' `
+            -DestinationPath "release-assets/FH2VR-FH2ML-$label.zip" -Force
+
+          Get-FileHash release-assets/*.zip -Algorithm SHA256 | Format-Table
+
+      - name: Publish dev-latest prerelease
+        if: github.event_name == 'push' && github.ref == 'refs/heads/feature/present-probe-0.4.0-dev'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f dev-latest $env:GITHUB_SHA
+          git push origin refs/tags/dev-latest --force
+
+          $body = @"
+          Automated development build from commit ``$($env:GITHUB_SHA.Substring(0, 7))``.
+
+          **Standalone**
+          - single ``FH2VR.exe`` with embedded native runtime
+          - automatic Azimuth detection/attach
+          - F1: VR toggle / recenter
+          - F2: GUI/HUD overlay
+
+          **Current development renderer**
+          - M10.2 positional parallax
+          - corrected left/right parallax direction
+          - stronger parallax with overscan and soft saturation
+          - automatic SteamVR/OpenVR reconnect after headset disconnects
+
+          This is an experimental prerelease for testing.
+          "@
+
+          gh release view dev-latest *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release edit dev-latest `
+              --title "FH2VR Development Build" `
+              --notes $body `
+              --prerelease
+          } else {
+            gh release create dev-latest `
+              --title "FH2VR Development Build" `
+              --notes $body `
+              --prerelease
+          }
+
+          gh release upload dev-latest release-assets/*.zip --clobber
+
+      - name: Publish tagged release
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $isPrerelease = $tag -match '(?i)(dev|alpha|beta|rc)'
+
+          $args = @(
+            'release', 'create', $tag,
+            'release-assets/*',
+            '--title', "FH2VR $tag",
+            '--generate-notes'
+          )
+          if ($isPrerelease) {
+            $args += '--prerelease'
+          }
+
+          & gh @args
