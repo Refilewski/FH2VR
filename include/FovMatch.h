@@ -12,3 +12,8 @@ void update_fov_match_target(float sourceVerticalFovRadians,
                              float combinedHorizontalFovRadians);
 
 } // namespace fh2vr
+
+// Renderer milestone files keep most implementation helpers in an anonymous
+// namespace. Make the public FH2VR FOV-target function available there without
+// duplicating the declaration or implementation.
+using fh2vr::update_fov_match_target;
