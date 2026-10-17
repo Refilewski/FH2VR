@@ -1,10 +1,13 @@
 #include "RendererPreview.h"
 #include "FovMatch.h"
+#include "GameBaseLocator.h"
+#include "UiModeDetector.h"
 
 #include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <string>
 
 // Reuse the proven native D3D12 capture + R10->R8 conversion path.
@@ -50,7 +53,6 @@ bool build_projection_m8(vr::IVRSystem *system,
         return false;
     }
 
-    // Fit the combined Quest frustum into FH2's real 16:9 source projection.
     out.sourceTanHalfY = std::max(out.combinedTanHalfY,
                                   out.combinedTanHalfX / out.sourceAspect);
     out.sourceTanHalfX = out.sourceAspect * out.sourceTanHalfY;
@@ -185,9 +187,15 @@ vr::HmdMatrix34_t roll_neutral_pose_m8(const vr::HmdMatrix34_t &input,
 }
 
 struct FlatOverlayStateM8 {
-    bool enabled = false;
+    bool manualEnabled = false;
     bool f5WasDown = false;
+    bool automaticEnabled = false;
     bool visible = false;
+    std::uintptr_t gameBase = 0;
+    ULONGLONG nextLocateAt = 0;
+    ULONGLONG nextUiSampleAt = 0;
+    ULONGLONG unknownSince = 0;
+    fh2vr::UiMode lastMode = fh2vr::UiMode::Unknown;
     vr::VROverlayHandle_t handle = vr::k_ulOverlayHandleInvalid;
 };
 
@@ -213,19 +221,87 @@ void hide_flat_overlay_m8() {
     g_flatOverlayM8.visible = false;
 }
 
+void sample_automatic_ui_m8() {
+    constexpr ULONGLONG kSampleIntervalMs = 50;
+    constexpr ULONGLONG kUnknownReleaseMs = 500;
+    constexpr ULONGLONG kLocateRetryMs = 2000;
+
+    const ULONGLONG now = GetTickCount64();
+    if (now < g_flatOverlayM8.nextUiSampleAt) {
+        return;
+    }
+    g_flatOverlayM8.nextUiSampleAt = now + kSampleIntervalMs;
+
+    if (!g_flatOverlayM8.gameBase && now >= g_flatOverlayM8.nextLocateAt) {
+        const std::uintptr_t found = fh2vr::find_fh2_game_base();
+        if (found) {
+            g_flatOverlayM8.gameBase = found;
+            fh2vr::set_ui_game_base(found);
+            char buffer[192]{};
+            std::snprintf(buffer, sizeof(buffer),
+                          "M8.2 FH2 UI detector attached to game image base 0x%llX",
+                          static_cast<unsigned long long>(found));
+            log_line(buffer);
+        } else {
+            g_flatOverlayM8.nextLocateAt = now + kLocateRetryMs;
+        }
+    }
+
+    if (!g_flatOverlayM8.gameBase) {
+        return;
+    }
+
+    const fh2vr::UiMode mode = fh2vr::read_ui_mode();
+    if (mode != g_flatOverlayM8.lastMode) {
+        char buffer[192]{};
+        std::snprintf(buffer, sizeof(buffer),
+                      "M8.2 FH2 UI state: %s -> %s",
+                      fh2vr::ui_mode_name(g_flatOverlayM8.lastMode),
+                      fh2vr::ui_mode_name(mode));
+        log_line(buffer);
+        g_flatOverlayM8.lastMode = mode;
+    }
+
+    if (fh2vr::ui_mode_wants_flat_overlay(mode)) {
+        g_flatOverlayM8.unknownSince = 0;
+        if (!g_flatOverlayM8.automaticEnabled) {
+            g_flatOverlayM8.automaticEnabled = true;
+            std::string message = "M8.2 automatic layered GUI enabled: ";
+            message += fh2vr::ui_mode_name(mode);
+            log_line(message.c_str());
+        }
+        return;
+    }
+
+    if (!g_flatOverlayM8.automaticEnabled) {
+        g_flatOverlayM8.unknownSince = 0;
+        return;
+    }
+
+    if (g_flatOverlayM8.unknownSince == 0) {
+        g_flatOverlayM8.unknownSince = now;
+        return;
+    }
+
+    if (now - g_flatOverlayM8.unknownSince >= kUnknownReleaseMs) {
+        g_flatOverlayM8.automaticEnabled = false;
+        g_flatOverlayM8.unknownSince = 0;
+        log_line("M8.2 automatic layered GUI released after stable gameplay/Unknown state");
+    }
+}
+
 bool poll_flat_mode_m8() {
     const bool down = (GetAsyncKeyState(VK_F5) & 0x8000) != 0;
     if (down && !g_flatOverlayM8.f5WasDown) {
-        g_flatOverlayM8.enabled = !g_flatOverlayM8.enabled;
-        if (g_flatOverlayM8.enabled) {
-            log_line("M8.1 F5: layered GUI overlay enabled; VR gameplay remains behind it");
-        } else {
-            hide_flat_overlay_m8();
-            log_line("M8.1 F5: GUI overlay hidden; VR world remains active");
-        }
+        g_flatOverlayM8.manualEnabled = !g_flatOverlayM8.manualEnabled;
+        log_line(g_flatOverlayM8.manualEnabled
+                     ? "M8.2 F5: manual layered GUI force enabled"
+                     : "M8.2 F5: manual layered GUI force disabled; automatic detection remains active");
     }
     g_flatOverlayM8.f5WasDown = down;
-    return g_flatOverlayM8.enabled;
+
+    sample_automatic_ui_m8();
+    return g_flatOverlayM8.manualEnabled || g_flatOverlayM8.automaticEnabled;
 }
 
 bool ensure_flat_overlay_m8(std::string &error) {
@@ -280,7 +356,7 @@ bool ensure_flat_overlay_m8(std::string &error) {
 
     overlay->SetOverlayAlpha(handle, 1.0f);
     overlay->SetOverlayInputMethod(handle, vr::VROverlayInputMethod_None);
-    log_line("M8.1 layered GUI overlay created: width=2.4m distance=2.2m");
+    log_line("M8.2 layered GUI overlay created: width=2.4m distance=2.2m; auto UI detection + F5 force");
     return true;
 }
 
@@ -318,7 +394,7 @@ bool submit_flat_overlay_m8(ID3D12Resource *texture,
 
     if (!g_flatOverlayM8.visible) {
         g_flatOverlayM8.visible = true;
-        log_line("M8.1 layered GUI overlay submit OK: flat 16:9 screen over live VR gameplay");
+        log_line("M8.2 layered GUI overlay submit OK: flat 16:9 screen over live VR gameplay");
     }
 
     error.clear();
@@ -336,7 +412,7 @@ void log_projection_once_m8(const ProjectionM8 &p,
     char buffer[900]{};
     std::snprintf(
         buffer, sizeof(buffer),
-        "M8.1 projection/FOV: HMD=%.2fx%.2f deg; FH2=%llux%u aspect=%.5f target=%.2fx%.2f deg; F5=layered GUI",
+        "M8.2 projection/FOV: HMD=%.2fx%.2f deg; FH2=%llux%u aspect=%.5f target=%.2fx%.2f deg; GUI=automatic+F5",
         p.combinedHorizontalFovRadians * kRadToDeg,
         p.combinedVerticalFovRadians * kRadToDeg,
         static_cast<unsigned long long>(desc.Width), desc.Height,
@@ -361,7 +437,7 @@ void log_reprojection_stats_m8(UINT64 latestFence) {
     char buffer[512]{};
     std::snprintf(
         buffer, sizeof(buffer),
-        "M8.1 compositor cadence: %.2f pairs/s; unique FH2=%.2f/s; repeated=%.2f/s; fence=%llu",
+        "M8.2 compositor cadence: %.2f pairs/s; unique FH2=%.2f/s; repeated=%.2f/s; fence=%llu",
         static_cast<double>(g_reprojectionM8.pairSubmits) * scale,
         static_cast<double>(g_reprojectionM8.uniqueFrames) * scale,
         static_cast<double>(g_reprojectionM8.repeatedFrames) * scale,
@@ -422,7 +498,7 @@ bool submit_direct_d3d12_mono_preview(vr::IVRCompositor *compositor,
     if (!build_projection_m8(vr::VRSystem(), desc, projection)) {
         texture->Release();
         queue->Release();
-        error = "M8.1 projection build failed";
+        error = "M8.2 projection build failed";
         return false;
     }
 
@@ -458,7 +534,7 @@ bool submit_direct_d3d12_mono_preview(vr::IVRCompositor *compositor,
     if (leftResult != vr::VRCompositorError_None) {
         texture->Release();
         queue->Release();
-        error = compositor_error("M8.1 Submit(left)", leftResult);
+        error = compositor_error("M8.2 Submit(left)", leftResult);
         return false;
     }
 
@@ -467,7 +543,7 @@ bool submit_direct_d3d12_mono_preview(vr::IVRCompositor *compositor,
     if (rightResult != vr::VRCompositorError_None) {
         texture->Release();
         queue->Release();
-        error = compositor_error("M8.1 Submit(right)", rightResult);
+        error = compositor_error("M8.2 Submit(right)", rightResult);
         return false;
     }
 
@@ -487,7 +563,7 @@ bool submit_direct_d3d12_mono_preview(vr::IVRCompositor *compositor,
         char buffer[640]{};
         std::snprintf(
             buffer, sizeof(buffer),
-            "M8.1 VR world submit OK: roll-neutral pose, first removed roll=%.2f deg; F5=layered GUI",
+            "M8.2 VR world submit OK: roll-neutral pose, first removed roll=%.2f deg; automatic layered GUI active",
             removedRollDegrees);
         log_line(buffer);
     }
