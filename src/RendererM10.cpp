@@ -135,14 +135,24 @@ bool submit_scene_m10(vr::IVRCompositor *compositor,
     const vr::HmdMatrix34_t cameraMatchedPose =
         roll_neutral_pose_m9(stableTrackedPose, &removedRollDegrees);
 
+    // Use the real HMD translation only to derive our controlled M10
+    // parallax. A mono FH2 frame has no scene depth, so passing that same
+    // translation to OpenVR's TextureWithPose causes the compositor to apply
+    // a second, depthless translational reprojection (the subtle curved/U
+    // motion seen when moving the head sideways).
     apply_head_position_parallax_m10(projection, cameraMatchedPose);
+
+    vr::HmdMatrix34_t compositorPose = cameraMatchedPose;
+    compositorPose.m[0][3] = 0.0f;
+    compositorPose.m[1][3] = 0.0f;
+    compositorPose.m[2][3] = 0.0f;
 
     vr::D3D12TextureData_t d3d12Texture{texture, queue, 0};
     vr::VRTextureWithPose_t submitted{};
     submitted.handle = &d3d12Texture;
     submitted.eType = vr::TextureType_DirectX12;
     submitted.eColorSpace = vr::ColorSpace_Gamma;
-    submitted.mDeviceToAbsoluteTracking = cameraMatchedPose;
+    submitted.mDeviceToAbsoluteTracking = compositorPose;
 
     const vr::EVRCompositorError leftResult = compositor->Submit(
         vr::Eye_Left, &submitted, &projection.left, vr::Submit_TextureWithPose);
@@ -164,9 +174,9 @@ bool submit_scene_m10(vr::IVRCompositor *compositor,
 
     static std::atomic<bool> loggedSuccess{false};
     if (!loggedSuccess.exchange(true, std::memory_order_acq_rel)) {
-        char buffer[384]{};
+        char buffer[448]{};
         std::snprintf(buffer, sizeof(buffer),
-                      "M10 VR scene submit OK: roll-neutral + positional parallax, first removed roll=%.2f deg",
+                      "M10 VR scene submit OK: roll-neutral orientation-only compositor pose + positional parallax, first removed roll=%.2f deg",
                       removedRollDegrees);
         log_line(buffer);
     }
