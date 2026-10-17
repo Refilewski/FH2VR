@@ -6,39 +6,47 @@
 #include <windows.h>
 
 #include <atomic>
-#include <cmath>
 #include <cstdint>
 #include <cstdio>
-#include <cstring>
 #include <string>
 
 namespace {
-constexpr uintptr_t kDriverCameraVtableRva = 0x2E78120;
-constexpr uintptr_t kCameraUpdateSlot = 0x20;
-constexpr uintptr_t kPlayerManagerRva = 0x34ABA60;
-constexpr uintptr_t kViewVtableA = 0x2C66188;
-constexpr uintptr_t kViewVtableB = 0x2E6E890;
-constexpr uintptr_t kCachedCameraVtable = 0x2C6C840;
-constexpr uintptr_t kCachedViewMatrixOffset = 0x260;
-constexpr size_t kDriverScanBytes = 0x400;
-
 using PresentFn = HRESULT(WINAPI *)(IDXGISwapChain *, UINT, UINT);
-using CameraUpdateFn = void (*)(void *, float, unsigned char);
+using ExecuteCommandListsFn = void(STDMETHODCALLTYPE *)(
+    ID3D12CommandQueue *, UINT, ID3D12CommandList *const *);
+
+struct EyeCopyState {
+    ID3D12Resource *texture = nullptr;
+    ID3D12CommandAllocator *allocator = nullptr;
+    UINT64 fenceValue = 0;
+    bool hasFrame = false;
+};
 
 PresentFn g_originalPresent = nullptr;
-CameraUpdateFn g_previousCameraUpdate = nullptr;
-uintptr_t g_gameBase = 0;
-std::atomic<std::uint64_t> g_cameraUpdates{0};
-std::atomic<std::uint64_t> g_persisted{0};
-std::atomic<std::uint64_t> g_rebuilt{0};
-std::atomic<bool> g_scanDriverRequested{false};
+ExecuteCommandListsFn g_originalExecuteCommandLists = nullptr;
+
 std::atomic<bool> g_primarySwapchainChosen{false};
 IDXGISwapChain *g_primarySwapchain = nullptr;
-float g_lastMatrix12AfterHook = 0.0f;
-bool g_haveLastMatrix12 = false;
-ULONGLONG g_lastPresentLogAt = 0;
+IDXGISwapChain3 *g_primarySwapchain3 = nullptr;
+std::atomic<ID3D12Device *> g_primaryDevice{nullptr};
+std::atomic<ID3D12CommandQueue *> g_primaryQueue{nullptr};
+
+EyeCopyState g_eyeCopies[2]{};
+ID3D12GraphicsCommandList *g_copyList = nullptr;
+ID3D12Fence *g_copyFence = nullptr;
+HANDLE g_fenceEvent = nullptr;
+UINT64 g_nextFenceValue = 1;
+D3D12_RESOURCE_DESC g_retainedDesc{};
+bool g_copyResourcesReady = false;
+int g_nextEye = 0;
+UINT g_lastBackBufferIndex = 0;
+
+std::atomic<std::uint64_t> g_gameExecuteCalls{0};
 std::uint64_t g_presentCountWindow = 0;
+std::uint64_t g_copyCountWindow = 0;
+ULONGLONG g_lastPresentLogAt = 0;
 SRWLOCK g_logLock = SRWLOCK_INIT;
+thread_local bool g_internalQueueSubmit = false;
 
 void log_line(const std::string &message) {
     AcquireSRWLockExclusive(&g_logLock);
@@ -48,180 +56,8 @@ void log_line(const std::string &message) {
                      static_cast<unsigned long long>(GetTickCount64()), message.c_str());
         std::fclose(file);
     }
-    OutputDebugStringA(("[FH2VR probe] " + message + "\n").c_str());
+    OutputDebugStringA(("[FH2VR D3D12 probe] " + message + "\n").c_str());
     ReleaseSRWLockExclusive(&g_logLock);
-}
-
-bool memory_readable(const void *address, size_t size) {
-    if (!address || size == 0) {
-        return false;
-    }
-    MEMORY_BASIC_INFORMATION information{};
-    if (!VirtualQuery(address, &information, sizeof(information)) ||
-        information.State != MEM_COMMIT ||
-        (information.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0) {
-        return false;
-    }
-    const uintptr_t start = reinterpret_cast<uintptr_t>(address);
-    const uintptr_t regionStart = reinterpret_cast<uintptr_t>(information.BaseAddress);
-    const uintptr_t regionEnd = regionStart + information.RegionSize;
-    return start >= regionStart && start + size >= start && start + size <= regionEnd;
-}
-
-template <typename T>
-bool read_value(const void *address, T &output) {
-    if (!memory_readable(address, sizeof(T))) {
-        return false;
-    }
-    std::memcpy(&output, address, sizeof(T));
-    return true;
-}
-
-bool read_pointer(const void *address, void **output) {
-    return output && read_value(address, *output) && *output;
-}
-
-bool has_vtable(void *object, uintptr_t expectedRva) {
-    void *vtable = nullptr;
-    return object && read_pointer(object, &vtable) &&
-           reinterpret_cast<uintptr_t>(vtable) == g_gameBase + expectedRva;
-}
-
-float *resolve_cached_view_matrix() {
-    if (!g_gameBase) {
-        return nullptr;
-    }
-
-    void *game = nullptr;
-    void *simulation = nullptr;
-    void *manager = nullptr;
-    void *views = nullptr;
-    void *view = nullptr;
-    void *camera = nullptr;
-
-    if (!read_pointer(reinterpret_cast<void *>(g_gameBase + kPlayerManagerRva), &game) ||
-        !read_pointer(static_cast<unsigned char *>(game) + 0x48, &simulation) ||
-        !read_pointer(static_cast<unsigned char *>(simulation) + 0x98, &manager) ||
-        !read_pointer(static_cast<unsigned char *>(manager) + 0x2D0, &views) ||
-        !read_pointer(views, &view) ||
-        (!has_vtable(view, kViewVtableA) && !has_vtable(view, kViewVtableB)) ||
-        !read_pointer(static_cast<unsigned char *>(view) + 0xC0, &camera) ||
-        !has_vtable(camera, kCachedCameraVtable)) {
-        return nullptr;
-    }
-
-    auto *matrix = reinterpret_cast<float *>(static_cast<unsigned char *>(camera) +
-                                             kCachedViewMatrixOffset);
-    return memory_readable(matrix, sizeof(float) * 16) ? matrix : nullptr;
-}
-
-bool read_matrix12(float &value) {
-    float *matrix = resolve_cached_view_matrix();
-    return matrix && read_value(matrix + 12, value) && std::isfinite(value);
-}
-
-void scan_driver_camera(void *camera) {
-    if (!camera || !memory_readable(camera, kDriverScanBytes)) {
-        log_line("Driver camera scan skipped: object is not readable for 0x400 bytes");
-        return;
-    }
-
-    float *matrix = resolve_cached_view_matrix();
-    if (!matrix || !memory_readable(matrix, sizeof(float) * 16)) {
-        log_line("Driver camera scan skipped: cached 0x260 matrix unavailable");
-        return;
-    }
-
-    const float mx = matrix[12];
-    const float mz = matrix[14];
-    const auto *values = static_cast<const float *>(camera);
-    const size_t floatCount = kDriverScanBytes / sizeof(float);
-    unsigned matches = 0;
-
-    log_line("Driver camera known-answer scan: cached X=" + std::to_string(mx) +
-             " Z=" + std::to_string(mz));
-
-    for (size_t i = 0; i + 2 < floatCount && matches < 16; ++i) {
-        const float x = values[i];
-        const float y = values[i + 1];
-        const float z = values[i + 2];
-        if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) {
-            continue;
-        }
-        if (std::fabs(x - mx) < 30.0f && std::fabs(z - mz) < 30.0f) {
-            char buffer[256]{};
-            std::snprintf(buffer, sizeof(buffer),
-                          "pos-like triple at +0x%zX: %.5f %.5f %.5f",
-                          i * sizeof(float), x, y, z);
-            log_line(buffer);
-            ++matches;
-        }
-    }
-
-    if (matches == 0) {
-        log_line("Driver camera known-answer scan: no X/Z candidate within +/-30 units");
-    }
-}
-
-void camera_probe_hook(void *camera, float dt, unsigned char reset) {
-    float before = 0.0f;
-    if (g_haveLastMatrix12 && read_matrix12(before)) {
-        const float tolerance = 0.00001f * ((std::fabs(g_lastMatrix12AfterHook) > 1.0f)
-                                                ? std::fabs(g_lastMatrix12AfterHook)
-                                                : 1.0f);
-        if (std::fabs(before - g_lastMatrix12AfterHook) <= tolerance) {
-            g_persisted.fetch_add(1, std::memory_order_relaxed);
-        } else {
-            g_rebuilt.fetch_add(1, std::memory_order_relaxed);
-        }
-    }
-
-    if (g_previousCameraUpdate) {
-        g_previousCameraUpdate(camera, dt, reset);
-    }
-    g_cameraUpdates.fetch_add(1, std::memory_order_relaxed);
-
-    float after = 0.0f;
-    if (read_matrix12(after)) {
-        g_lastMatrix12AfterHook = after;
-        g_haveLastMatrix12 = true;
-    }
-
-    if (g_scanDriverRequested.exchange(false, std::memory_order_acq_rel)) {
-        scan_driver_camera(camera);
-    }
-}
-
-bool install_camera_probe() {
-    if (!g_gameBase) {
-        return false;
-    }
-    auto *slot = reinterpret_cast<CameraUpdateFn *>(
-        g_gameBase + kDriverCameraVtableRva + kCameraUpdateSlot);
-    if (!memory_readable(slot, sizeof(*slot))) {
-        log_line("Camera probe: driver vtable slot is unreadable");
-        return false;
-    }
-
-    CameraUpdateFn current = nullptr;
-    std::memcpy(&current, slot, sizeof(current));
-    if (!current || current == &camera_probe_hook) {
-        log_line("Camera probe: invalid/already hooked slot");
-        return false;
-    }
-
-    DWORD oldProtection = 0;
-    if (!VirtualProtect(slot, sizeof(*slot), PAGE_READWRITE, &oldProtection)) {
-        log_line("Camera probe: VirtualProtect failed");
-        return false;
-    }
-    g_previousCameraUpdate = current;
-    CameraUpdateFn replacement = &camera_probe_hook;
-    std::memcpy(slot, &replacement, sizeof(replacement));
-    DWORD ignored = 0;
-    VirtualProtect(slot, sizeof(*slot), oldProtection, &ignored);
-    log_line("Camera probe installed outside the existing FH2VR hook; F12 requests Driver-object scan");
-    return true;
 }
 
 bool current_process_window(HWND window) {
@@ -245,6 +81,326 @@ const char *format_name(DXGI_FORMAT format) {
     }
 }
 
+bool same_com_identity(IUnknown *a, IUnknown *b) {
+    if (!a || !b) {
+        return false;
+    }
+    IUnknown *identityA = nullptr;
+    IUnknown *identityB = nullptr;
+    const HRESULT resultA = a->QueryInterface(IID_PPV_ARGS(&identityA));
+    const HRESULT resultB = b->QueryInterface(IID_PPV_ARGS(&identityB));
+    const bool same = SUCCEEDED(resultA) && SUCCEEDED(resultB) && identityA == identityB;
+    if (identityA) {
+        identityA->Release();
+    }
+    if (identityB) {
+        identityB->Release();
+    }
+    return same;
+}
+
+bool queue_matches_primary_device(ID3D12CommandQueue *queue) {
+    ID3D12Device *primaryDevice = g_primaryDevice.load(std::memory_order_acquire);
+    if (!queue || !primaryDevice) {
+        return false;
+    }
+
+    const D3D12_COMMAND_QUEUE_DESC queueDesc = queue->GetDesc();
+    if (queueDesc.Type != D3D12_COMMAND_LIST_TYPE_DIRECT) {
+        return false;
+    }
+
+    ID3D12Device *queueDevice = nullptr;
+    if (FAILED(queue->GetDevice(IID_PPV_ARGS(&queueDevice))) || !queueDevice) {
+        return false;
+    }
+    const bool same = same_com_identity(primaryDevice, queueDevice);
+    queueDevice->Release();
+    return same;
+}
+
+void STDMETHODCALLTYPE execute_command_lists_hook(
+    ID3D12CommandQueue *queue, UINT count, ID3D12CommandList *const *lists) {
+    if (!g_originalExecuteCommandLists) {
+        return;
+    }
+
+    if (!g_internalQueueSubmit) {
+        g_gameExecuteCalls.fetch_add(1, std::memory_order_relaxed);
+
+        if (!g_primaryQueue.load(std::memory_order_acquire) &&
+            queue_matches_primary_device(queue)) {
+            queue->AddRef();
+            ID3D12CommandQueue *expected = nullptr;
+            if (g_primaryQueue.compare_exchange_strong(
+                    expected, queue, std::memory_order_acq_rel)) {
+                const D3D12_COMMAND_QUEUE_DESC desc = queue->GetDesc();
+                char buffer[320]{};
+                std::snprintf(buffer, sizeof(buffer),
+                              "Captured FH2 DIRECT command queue=%p priority=%d flags=0x%X nodeMask=0x%X",
+                              static_cast<void *>(queue), desc.Priority,
+                              static_cast<unsigned>(desc.Flags), desc.NodeMask);
+                log_line(buffer);
+            } else {
+                queue->Release();
+            }
+        }
+    }
+
+    g_originalExecuteCommandLists(queue, count, lists);
+}
+
+void release_copy_resources() {
+    if (g_copyFence) {
+        const UINT64 maxFence =
+            g_eyeCopies[0].fenceValue > g_eyeCopies[1].fenceValue
+                ? g_eyeCopies[0].fenceValue
+                : g_eyeCopies[1].fenceValue;
+        if (maxFence != 0 && g_copyFence->GetCompletedValue() < maxFence && g_fenceEvent) {
+            if (SUCCEEDED(g_copyFence->SetEventOnCompletion(maxFence, g_fenceEvent))) {
+                WaitForSingleObject(g_fenceEvent, 1000);
+            }
+        }
+    }
+
+    if (g_copyList) {
+        g_copyList->Release();
+        g_copyList = nullptr;
+    }
+    for (auto &eye : g_eyeCopies) {
+        if (eye.texture) {
+            eye.texture->Release();
+            eye.texture = nullptr;
+        }
+        if (eye.allocator) {
+            eye.allocator->Release();
+            eye.allocator = nullptr;
+        }
+        eye.fenceValue = 0;
+        eye.hasFrame = false;
+    }
+    if (g_copyFence) {
+        g_copyFence->Release();
+        g_copyFence = nullptr;
+    }
+    if (g_fenceEvent) {
+        CloseHandle(g_fenceEvent);
+        g_fenceEvent = nullptr;
+    }
+    g_copyResourcesReady = false;
+    g_retainedDesc = {};
+    g_nextFenceValue = 1;
+}
+
+bool wait_for_eye_copy(EyeCopyState &eye) {
+    if (!eye.fenceValue || !g_copyFence) {
+        return true;
+    }
+    if (g_copyFence->GetCompletedValue() >= eye.fenceValue) {
+        return true;
+    }
+    if (!g_fenceEvent || FAILED(g_copyFence->SetEventOnCompletion(eye.fenceValue, g_fenceEvent))) {
+        log_line("D3D12 copy wait failed to arm fence event");
+        return false;
+    }
+    const DWORD wait = WaitForSingleObject(g_fenceEvent, 1000);
+    if (wait != WAIT_OBJECT_0) {
+        log_line("D3D12 copy wait timed out; skipping frame instead of reusing busy resources");
+        return false;
+    }
+    return true;
+}
+
+bool resource_desc_matches(const D3D12_RESOURCE_DESC &a, const D3D12_RESOURCE_DESC &b) {
+    return a.Dimension == b.Dimension &&
+           a.Alignment == b.Alignment &&
+           a.Width == b.Width &&
+           a.Height == b.Height &&
+           a.DepthOrArraySize == b.DepthOrArraySize &&
+           a.MipLevels == b.MipLevels &&
+           a.Format == b.Format &&
+           a.SampleDesc.Count == b.SampleDesc.Count &&
+           a.SampleDesc.Quality == b.SampleDesc.Quality &&
+           a.Layout == b.Layout &&
+           a.Flags == b.Flags;
+}
+
+bool create_copy_resources(ID3D12Resource *backBuffer) {
+    ID3D12Device *device = g_primaryDevice.load(std::memory_order_acquire);
+    if (!device || !backBuffer) {
+        return false;
+    }
+
+    const D3D12_RESOURCE_DESC desc = backBuffer->GetDesc();
+    if (g_copyResourcesReady && resource_desc_matches(desc, g_retainedDesc)) {
+        return true;
+    }
+
+    if (g_copyResourcesReady) {
+        log_line("Backbuffer description changed; rebuilding retained D3D12 eye resources");
+        release_copy_resources();
+    }
+
+    D3D12_HEAP_PROPERTIES heap{};
+    heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    heap.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+    heap.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+    heap.CreationNodeMask = 1;
+    heap.VisibleNodeMask = 1;
+
+    for (int eye = 0; eye < 2; ++eye) {
+        if (FAILED(device->CreateCommittedResource(
+                &heap, D3D12_HEAP_FLAG_NONE, &desc,
+                D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                IID_PPV_ARGS(&g_eyeCopies[eye].texture)))) {
+            log_line("CreateCommittedResource failed for retained eye texture");
+            release_copy_resources();
+            return false;
+        }
+        if (FAILED(device->CreateCommandAllocator(
+                D3D12_COMMAND_LIST_TYPE_DIRECT,
+                IID_PPV_ARGS(&g_eyeCopies[eye].allocator)))) {
+            log_line("CreateCommandAllocator failed for retained eye copy");
+            release_copy_resources();
+            return false;
+        }
+    }
+
+    if (FAILED(device->CreateCommandList(
+            0, D3D12_COMMAND_LIST_TYPE_DIRECT, g_eyeCopies[0].allocator,
+            nullptr, IID_PPV_ARGS(&g_copyList))) || !g_copyList) {
+        log_line("CreateCommandList failed for D3D12 eye copy");
+        release_copy_resources();
+        return false;
+    }
+    if (FAILED(g_copyList->Close())) {
+        log_line("Initial Close failed for D3D12 eye copy command list");
+        release_copy_resources();
+        return false;
+    }
+
+    if (FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&g_copyFence)))) {
+        log_line("CreateFence failed for D3D12 eye copy");
+        release_copy_resources();
+        return false;
+    }
+    g_fenceEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    if (!g_fenceEvent) {
+        log_line("CreateEvent failed for D3D12 eye copy fence");
+        release_copy_resources();
+        return false;
+    }
+
+    g_retainedDesc = desc;
+    g_copyResourcesReady = true;
+    g_nextEye = 0;
+
+    char buffer[384]{};
+    std::snprintf(buffer, sizeof(buffer),
+                  "D3D12 retained eye resources ready: %llux%u format=%s(%d) left=%p right=%p",
+                  static_cast<unsigned long long>(desc.Width), desc.Height,
+                  format_name(desc.Format), static_cast<int>(desc.Format),
+                  static_cast<void *>(g_eyeCopies[0].texture),
+                  static_cast<void *>(g_eyeCopies[1].texture));
+    log_line(buffer);
+    return true;
+}
+
+bool copy_current_backbuffer() {
+    ID3D12CommandQueue *queue = g_primaryQueue.load(std::memory_order_acquire);
+    if (!queue || !g_primarySwapchain3) {
+        return false;
+    }
+
+    const UINT backBufferIndex = g_primarySwapchain3->GetCurrentBackBufferIndex();
+    ID3D12Resource *backBuffer = nullptr;
+    if (FAILED(g_primarySwapchain3->GetBuffer(
+            backBufferIndex, IID_PPV_ARGS(&backBuffer))) || !backBuffer) {
+        log_line("GetBuffer failed for current D3D12 swapchain backbuffer");
+        return false;
+    }
+
+    const bool resourcesReady = create_copy_resources(backBuffer);
+    if (!resourcesReady) {
+        backBuffer->Release();
+        return false;
+    }
+
+    EyeCopyState &eye = g_eyeCopies[g_nextEye];
+    if (!wait_for_eye_copy(eye)) {
+        backBuffer->Release();
+        return false;
+    }
+
+    if (FAILED(eye.allocator->Reset())) {
+        log_line("D3D12 eye copy allocator Reset failed");
+        backBuffer->Release();
+        return false;
+    }
+    if (FAILED(g_copyList->Reset(eye.allocator, nullptr))) {
+        log_line("D3D12 eye copy command list Reset failed");
+        backBuffer->Release();
+        return false;
+    }
+
+    D3D12_RESOURCE_BARRIER barriers[2]{};
+    barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barriers[0].Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+    barriers[0].Transition.pResource = backBuffer;
+    barriers[0].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+    barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+
+    barriers[1] = barriers[0];
+    barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
+
+    g_copyList->ResourceBarrier(1, &barriers[0]);
+    g_copyList->CopyResource(eye.texture, backBuffer);
+    g_copyList->ResourceBarrier(1, &barriers[1]);
+
+    if (FAILED(g_copyList->Close())) {
+        log_line("D3D12 eye copy command list Close failed");
+        backBuffer->Release();
+        return false;
+    }
+
+    ID3D12CommandList *lists[] = {g_copyList};
+    g_internalQueueSubmit = true;
+    queue->ExecuteCommandLists(1, lists);
+    g_internalQueueSubmit = false;
+
+    const UINT64 fenceValue = g_nextFenceValue++;
+    if (FAILED(queue->Signal(g_copyFence, fenceValue))) {
+        log_line("D3D12 eye copy queue Signal failed");
+        backBuffer->Release();
+        return false;
+    }
+
+    eye.fenceValue = fenceValue;
+    eye.hasFrame = true;
+    g_lastBackBufferIndex = backBufferIndex;
+    ++g_copyCountWindow;
+
+    static bool loggedLeft = false;
+    static bool loggedRight = false;
+    bool &logged = g_nextEye == 0 ? loggedLeft : loggedRight;
+    if (!logged) {
+        char buffer[320]{};
+        std::snprintf(buffer, sizeof(buffer),
+                      "Direct D3D12 backbuffer copy OK: eye=%s bbIndex=%u source=%p retained=%p fence=%llu",
+                      g_nextEye == 0 ? "left" : "right", backBufferIndex,
+                      static_cast<void *>(backBuffer), static_cast<void *>(eye.texture),
+                      static_cast<unsigned long long>(fenceValue));
+        log_line(buffer);
+        logged = true;
+    }
+
+    g_nextEye ^= 1;
+    backBuffer->Release();
+    return true;
+}
+
 void inspect_swapchain_once(IDXGISwapChain *swapchain) {
     DXGI_SWAP_CHAIN_DESC swapDesc{};
     if (FAILED(swapchain->GetDesc(&swapDesc))) {
@@ -255,47 +411,46 @@ void inspect_swapchain_once(IDXGISwapChain *swapchain) {
     std::string api = "unknown";
     ID3D11Device *device11 = nullptr;
     ID3D12Device *device12 = nullptr;
-    if (SUCCEEDED(swapchain->GetDevice(__uuidof(ID3D11Device),
-                                       reinterpret_cast<void **>(&device11))) && device11) {
+    if (SUCCEEDED(swapchain->GetDevice(
+            __uuidof(ID3D11Device), reinterpret_cast<void **>(&device11))) && device11) {
         api = "D3D11";
         device11->Release();
-    } else if (SUCCEEDED(swapchain->GetDevice(__uuidof(ID3D12Device),
-                                              reinterpret_cast<void **>(&device12))) && device12) {
+    } else if (SUCCEEDED(swapchain->GetDevice(
+                   __uuidof(ID3D12Device), reinterpret_cast<void **>(&device12))) && device12) {
         api = "D3D12";
-        device12->Release();
+        ID3D12Device *expected = nullptr;
+        if (!g_primaryDevice.compare_exchange_strong(
+                expected, device12, std::memory_order_acq_rel)) {
+            device12->Release();
+        }
+    }
+
+    IDXGISwapChain3 *swapchain3 = nullptr;
+    if (SUCCEEDED(swapchain->QueryInterface(IID_PPV_ARGS(&swapchain3))) && swapchain3) {
+        g_primarySwapchain3 = swapchain3;
     }
 
     UINT width = swapDesc.BufferDesc.Width;
     UINT height = swapDesc.BufferDesc.Height;
     DXGI_FORMAT format = swapDesc.BufferDesc.Format;
 
-    ID3D11Texture2D *buffer11 = nullptr;
-    if (SUCCEEDED(swapchain->GetBuffer(0, __uuidof(ID3D11Texture2D),
-                                       reinterpret_cast<void **>(&buffer11))) && buffer11) {
-        D3D11_TEXTURE2D_DESC desc{};
-        buffer11->GetDesc(&desc);
-        width = desc.Width;
+    ID3D12Resource *buffer12 = nullptr;
+    if (SUCCEEDED(swapchain->GetBuffer(0, IID_PPV_ARGS(&buffer12))) && buffer12) {
+        const D3D12_RESOURCE_DESC desc = buffer12->GetDesc();
+        width = static_cast<UINT>(desc.Width);
         height = desc.Height;
         format = desc.Format;
-        buffer11->Release();
-    } else {
-        ID3D12Resource *buffer12 = nullptr;
-        if (SUCCEEDED(swapchain->GetBuffer(0, __uuidof(ID3D12Resource),
-                                           reinterpret_cast<void **>(&buffer12))) && buffer12) {
-            const D3D12_RESOURCE_DESC desc = buffer12->GetDesc();
-            width = static_cast<UINT>(desc.Width);
-            height = desc.Height;
-            format = desc.Format;
-            buffer12->Release();
-        }
+        buffer12->Release();
     }
 
     char buffer[512]{};
     std::snprintf(buffer, sizeof(buffer),
-                  "Present probe locked game swapchain=%p API=%s HWND=%p backbuffer=%ux%u format=%s(%d) buffers=%u swapEffect=%d",
-                  static_cast<void *>(swapchain), api.c_str(), static_cast<void *>(swapDesc.OutputWindow),
-                  width, height, format_name(format), static_cast<int>(format), swapDesc.BufferCount,
-                  static_cast<int>(swapDesc.SwapEffect));
+                  "Present probe locked game swapchain=%p API=%s HWND=%p backbuffer=%ux%u format=%s(%d) buffers=%u swapEffect=%d swapchain3=%s",
+                  static_cast<void *>(swapchain), api.c_str(),
+                  static_cast<void *>(swapDesc.OutputWindow), width, height,
+                  format_name(format), static_cast<int>(format), swapDesc.BufferCount,
+                  static_cast<int>(swapDesc.SwapEffect),
+                  g_primarySwapchain3 ? "yes" : "no");
     log_line(buffer);
 }
 
@@ -315,6 +470,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain *swapchain, UINT syncInterval, UINT f
                     bool expected = false;
                     if (g_primarySwapchainChosen.compare_exchange_strong(
                             expected, true, std::memory_order_acq_rel)) {
+                        swapchain->AddRef();
                         g_primarySwapchain = swapchain;
                         inspect_swapchain_once(swapchain);
                         g_lastPresentLogAt = GetTickCount64();
@@ -326,6 +482,8 @@ HRESULT WINAPI present_hook(IDXGISwapChain *swapchain, UINT syncInterval, UINT f
 
     if (swapchain == g_primarySwapchain) {
         ++g_presentCountWindow;
+        copy_current_backbuffer();
+
         const ULONGLONG now = GetTickCount64();
         if (now - g_lastPresentLogAt >= 1000) {
             const ULONGLONG elapsed = now - g_lastPresentLogAt;
@@ -333,18 +491,20 @@ HRESULT WINAPI present_hook(IDXGISwapChain *swapchain, UINT syncInterval, UINT f
                                    ? static_cast<double>(g_presentCountWindow) * 1000.0 /
                                          static_cast<double>(elapsed)
                                    : 0.0;
-            const std::uint64_t camera = g_cameraUpdates.exchange(0, std::memory_order_relaxed);
-            const std::uint64_t persisted = g_persisted.exchange(0, std::memory_order_relaxed);
-            const std::uint64_t rebuilt = g_rebuilt.exchange(0, std::memory_order_relaxed);
-            char buffer[320]{};
+            const std::uint64_t executeCalls =
+                g_gameExecuteCalls.exchange(0, std::memory_order_relaxed);
+            ID3D12CommandQueue *queue = g_primaryQueue.load(std::memory_order_acquire);
+            char buffer[384]{};
             std::snprintf(buffer, sizeof(buffer),
-                          "Present %.2f fps; camera updates/s=%llu; 0x260 persisted=%llu rebuilt=%llu; syncInterval=%u flags=0x%X",
-                          fps,
-                          static_cast<unsigned long long>(camera),
-                          static_cast<unsigned long long>(persisted),
-                          static_cast<unsigned long long>(rebuilt), syncInterval, flags);
+                          "Present %.2f fps; game ExecuteCommandLists/s=%llu; queue=%p; directCopies/s=%llu; nextEye=%s; lastBB=%u; syncInterval=%u flags=0x%X",
+                          fps, static_cast<unsigned long long>(executeCalls),
+                          static_cast<void *>(queue),
+                          static_cast<unsigned long long>(g_copyCountWindow),
+                          g_nextEye == 0 ? "left" : "right", g_lastBackBufferIndex,
+                          syncInterval, flags);
             log_line(buffer);
             g_presentCountWindow = 0;
+            g_copyCountWindow = 0;
             g_lastPresentLogAt = now;
         }
     }
@@ -356,7 +516,16 @@ LRESULT CALLBACK dummy_window_proc(HWND window, UINT message, WPARAM wParam, LPA
     return DefWindowProcW(window, message, wParam, lParam);
 }
 
-bool install_present_probe() {
+bool ensure_minhook_initialized() {
+    const MH_STATUS status = MH_Initialize();
+    if (status == MH_OK || status == MH_ERROR_ALREADY_INITIALIZED) {
+        return true;
+    }
+    log_line("MH_Initialize failed status=" + std::to_string(status));
+    return false;
+}
+
+bool install_present_hook() {
     const wchar_t className[] = L"FH2VR_RendererProbeWindow";
     WNDCLASSW windowClass{};
     windowClass.lpfnWndProc = dummy_window_proc;
@@ -388,8 +557,9 @@ bool install_present_probe() {
     ID3D11DeviceContext *context = nullptr;
     D3D_FEATURE_LEVEL featureLevel{};
     const HRESULT createResult = D3D11CreateDeviceAndSwapChain(
-        nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, nullptr, 0, D3D11_SDK_VERSION,
-        &desc, &dummySwapchain, &device, &featureLevel, &context);
+        nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, nullptr, 0,
+        D3D11_SDK_VERSION, &desc, &dummySwapchain, &device,
+        &featureLevel, &context);
     (void)featureLevel;
     if (FAILED(createResult) || !dummySwapchain) {
         if (context) context->Release();
@@ -401,37 +571,20 @@ bool install_present_probe() {
 
     void **vtable = *reinterpret_cast<void ***>(dummySwapchain);
     void *target = vtable[8];
-
-    const MH_STATUS initStatus = MH_Initialize();
-    if (initStatus != MH_OK && initStatus != MH_ERROR_ALREADY_INITIALIZED) {
-        dummySwapchain->Release();
-        context->Release();
-        device->Release();
-        DestroyWindow(window);
-        log_line("Present probe: MH_Initialize failed status=" + std::to_string(initStatus));
-        return false;
-    }
-
     const MH_STATUS createStatus = MH_CreateHook(
         target, reinterpret_cast<void *>(&present_hook),
         reinterpret_cast<void **>(&g_originalPresent));
-    if (createStatus != MH_OK) {
-        dummySwapchain->Release();
-        context->Release();
-        device->Release();
-        DestroyWindow(window);
-        log_line("Present probe: MH_CreateHook failed status=" + std::to_string(createStatus));
-        return false;
-    }
+    const MH_STATUS enableStatus =
+        createStatus == MH_OK ? MH_EnableHook(target) : createStatus;
 
-    const MH_STATUS enableStatus = MH_EnableHook(target);
     dummySwapchain->Release();
     context->Release();
     device->Release();
     DestroyWindow(window);
 
-    if (enableStatus != MH_OK) {
-        log_line("Present probe: MH_EnableHook failed status=" + std::to_string(enableStatus));
+    if (createStatus != MH_OK || enableStatus != MH_OK) {
+        log_line("Present hook install failed create=" + std::to_string(createStatus) +
+                 " enable=" + std::to_string(enableStatus));
         return false;
     }
 
@@ -439,28 +592,64 @@ bool install_present_probe() {
     return true;
 }
 
-DWORD WINAPI probe_thread(void *) {
-    Sleep(3000); // Let FH2ML/FH2VR finish installing their normal camera hook first.
-    g_gameBase = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+bool install_execute_command_lists_hook() {
+    ID3D12Device *device = nullptr;
+    const HRESULT deviceResult = D3D12CreateDevice(
+        nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device));
+    if (FAILED(deviceResult) || !device) {
+        log_line("ExecuteCommandLists probe: D3D12CreateDevice failed");
+        return false;
+    }
 
-    log_line("Renderer probe starting; d3d11=" +
+    D3D12_COMMAND_QUEUE_DESC desc{};
+    desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+    desc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
+    desc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
+    desc.NodeMask = 0;
+
+    ID3D12CommandQueue *queue = nullptr;
+    if (FAILED(device->CreateCommandQueue(&desc, IID_PPV_ARGS(&queue))) || !queue) {
+        device->Release();
+        log_line("ExecuteCommandLists probe: dummy CreateCommandQueue failed");
+        return false;
+    }
+
+    void **vtable = *reinterpret_cast<void ***>(queue);
+    void *target = vtable[10];
+    const MH_STATUS createStatus = MH_CreateHook(
+        target, reinterpret_cast<void *>(&execute_command_lists_hook),
+        reinterpret_cast<void **>(&g_originalExecuteCommandLists));
+    const MH_STATUS enableStatus =
+        createStatus == MH_OK ? MH_EnableHook(target) : createStatus;
+
+    queue->Release();
+    device->Release();
+
+    if (createStatus != MH_OK || enableStatus != MH_OK) {
+        log_line("ExecuteCommandLists hook install failed create=" +
+                 std::to_string(createStatus) + " enable=" +
+                 std::to_string(enableStatus));
+        return false;
+    }
+
+    log_line("ID3D12CommandQueue::ExecuteCommandLists hook installed from dummy DIRECT queue vtable[10]");
+    return true;
+}
+
+DWORD WINAPI probe_thread(void *) {
+    Sleep(3000);
+
+    log_line("Renderer probe starting: direct D3D12 M1; d3d11=" +
              std::string(GetModuleHandleW(L"d3d11.dll") ? "loaded" : "not-loaded") +
              " d3d12=" + std::string(GetModuleHandleW(L"d3d12.dll") ? "loaded" : "not-loaded") +
              " dxgi=" + std::string(GetModuleHandleW(L"dxgi.dll") ? "loaded" : "not-loaded"));
 
-    install_camera_probe();
-    install_present_probe();
-
-    bool f12WasDown = false;
-    for (;;) {
-        const bool f12Down = (GetAsyncKeyState(VK_F12) & 0x8000) != 0;
-        if (f12Down && !f12WasDown) {
-            g_scanDriverRequested.store(true, std::memory_order_release);
-            log_line("F12 observed by renderer probe: Driver camera scan requested");
-        }
-        f12WasDown = f12Down;
-        Sleep(4);
+    if (!ensure_minhook_initialized()) {
+        return 0;
     }
+    install_execute_command_lists_hook();
+    install_present_hook();
+    return 0;
 }
 
 struct ProbeBootstrap {
