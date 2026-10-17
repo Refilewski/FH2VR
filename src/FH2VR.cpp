@@ -13,7 +13,7 @@
 
 namespace {
 constexpr char kModId[] = "fh2vr";
-constexpr char kVersion[] = "0.2.1-dev";
+constexpr char kVersion[] = "0.3.0-dev";
 
 // Forza Horizon 2 Xbox One 1.0.0.64 camera layout, confirmed against the
 // camera hooks used by ForzaHorizon2_ExtraOptions.
@@ -21,6 +21,14 @@ constexpr uintptr_t kDriverCameraVtableRva = 0x2E78120;
 constexpr uintptr_t kCameraUpdateSlot = 0x20;
 constexpr uintptr_t kCameraHeadingOffset = 0x1C0;
 constexpr uintptr_t kCameraViewDirtyOffset = 0x21A;
+
+// Extra Options' minimap camera path exposes a cached 4x4 view/camera matrix.
+constexpr uintptr_t kPlayerManagerRva = 0x34ABA60;
+constexpr uintptr_t kViewVtableA = 0x2C66188;
+constexpr uintptr_t kViewVtableB = 0x2E6E890;
+constexpr uintptr_t kCachedCameraVtable = 0x2C6C840;
+constexpr uintptr_t kCachedViewMatrixOffset = 0x260;
+
 constexpr float kPi = 3.14159265358979323846f;
 constexpr float kPitchLimit = 1.39626340159546366154f; // 80 degrees
 constexpr float kMockYawSpeed = kPi / 2.0f;            // 90 degrees / second
@@ -30,13 +38,22 @@ constexpr ULONGLONG kVrRetryMs = 2000;
 using CameraUpdate = void (*)(void *camera, float dt, unsigned char reset);
 
 const FH2ML_HostAPI *g_api = nullptr;
+uintptr_t g_gameBase = 0;
 CameraUpdate g_originalCameraUpdate = nullptr;
 std::atomic<bool> g_stop{false};
 std::atomic<bool> g_trackingEnabled{true};
 std::atomic<bool> g_mockMode{false};
 std::atomic<bool> g_previewEnabled{false};
+std::atomic<bool> g_aerEnabled{false};
+std::atomic<bool> g_aerSwapEyes{false};
+std::atomic<bool> g_aerMatrixTouched{false};
+std::atomic<bool> g_eyeOffsetsValid{false};
 std::atomic<bool> g_poseValid{false};
 std::atomic<bool> g_recenterRequested{true};
+std::atomic<int> g_aerNextEye{0};
+std::atomic<int> g_aerRenderedEye{0};
+std::atomic<float> g_leftEyeX{0.0f};
+std::atomic<float> g_rightEyeX{0.0f};
 std::atomic<float> g_yaw{0.0f};
 std::atomic<float> g_pitch{0.0f};
 
@@ -67,7 +84,41 @@ bool key_down(int virtualKey) {
     return (GetAsyncKeyState(virtualKey) & 0x8000) != 0;
 }
 
+bool memory_readable(const void *address, size_t size) {
+    if (!address || size == 0) {
+        return false;
+    }
+
+    MEMORY_BASIC_INFORMATION information{};
+    if (!VirtualQuery(address, &information, sizeof(information)) ||
+        information.State != MEM_COMMIT ||
+        (information.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0) {
+        return false;
+    }
+
+    const uintptr_t start = reinterpret_cast<uintptr_t>(address);
+    const uintptr_t regionStart = reinterpret_cast<uintptr_t>(information.BaseAddress);
+    const uintptr_t regionEnd = regionStart + information.RegionSize;
+    return start >= regionStart && start + size >= start && start + size <= regionEnd;
+}
+
+bool read_memory(const void *address, void *output, size_t size) {
+    if (!output || !memory_readable(address, size)) {
+        return false;
+    }
+    std::memcpy(output, address, size);
+    return true;
+}
+
+bool read_pointer(const void *address, void **output) {
+    return output && read_memory(address, output, sizeof(*output)) && *output;
+}
+
 bool write_memory(void *address, const void *data, size_t size) {
+    if (!address || !data || size == 0) {
+        return false;
+    }
+
     DWORD oldProtection = 0;
     if (!VirtualProtect(address, size, PAGE_READWRITE, &oldProtection)) {
         return false;
@@ -80,6 +131,92 @@ bool write_memory(void *address, const void *data, size_t size) {
     return restored != FALSE;
 }
 
+bool has_vtable(void *object, uintptr_t expectedRva) {
+    void *vtable = nullptr;
+    return object && read_pointer(object, &vtable) &&
+           reinterpret_cast<uintptr_t>(vtable) == g_gameBase + expectedRva;
+}
+
+float *resolve_cached_view_matrix() {
+    if (!g_gameBase) {
+        return nullptr;
+    }
+
+    void *game = nullptr;
+    void *simulation = nullptr;
+    void *manager = nullptr;
+    void *views = nullptr;
+    void *view = nullptr;
+    void *camera = nullptr;
+
+    if (!read_pointer(reinterpret_cast<void *>(g_gameBase + kPlayerManagerRva), &game) ||
+        !read_pointer(static_cast<unsigned char *>(game) + 0x48, &simulation) ||
+        !read_pointer(static_cast<unsigned char *>(simulation) + 0x98, &manager) ||
+        !read_pointer(static_cast<unsigned char *>(manager) + 0x2D0, &views) ||
+        !read_pointer(views, &view) ||
+        (!has_vtable(view, kViewVtableA) && !has_vtable(view, kViewVtableB)) ||
+        !read_pointer(static_cast<unsigned char *>(view) + 0xC0, &camera) ||
+        !has_vtable(camera, kCachedCameraVtable)) {
+        return nullptr;
+    }
+
+    auto *matrix = reinterpret_cast<float *>(static_cast<unsigned char *>(camera) +
+                                             kCachedViewMatrixOffset);
+    return memory_readable(matrix, sizeof(float) * 16) ? matrix : nullptr;
+}
+
+bool apply_aer_eye_offset(int eye) {
+    if (!g_aerEnabled.load(std::memory_order_relaxed) ||
+        !g_eyeOffsetsValid.load(std::memory_order_acquire)) {
+        return false;
+    }
+
+    float *matrixAddress = resolve_cached_view_matrix();
+    if (!matrixAddress) {
+        return false;
+    }
+
+    float matrix[16]{};
+    if (!read_memory(matrixAddress, matrix, sizeof(matrix))) {
+        return false;
+    }
+
+    // Extra Options identifies [2,6,10] as the third column/look direction.
+    // Treat the first column as camera-right and the fourth column as position.
+    // This is deliberately an experimental probe; F11 swaps the retained eye
+    // assignment if the live game's convention is opposite to OpenVR's.
+    float rightX = matrix[0];
+    float rightY = matrix[4];
+    float rightZ = matrix[8];
+    const float length = std::sqrt(rightX * rightX + rightY * rightY + rightZ * rightZ);
+    if (!std::isfinite(length) || length < 0.5f || length > 1.5f) {
+        return false;
+    }
+
+    rightX /= length;
+    rightY /= length;
+    rightZ /= length;
+
+    const float eyeX = eye == 0 ? g_leftEyeX.load(std::memory_order_relaxed)
+                                : g_rightEyeX.load(std::memory_order_relaxed);
+    if (!std::isfinite(eyeX) || std::fabs(eyeX) > 0.15f) {
+        return false;
+    }
+
+    matrix[3] += rightX * eyeX;
+    matrix[7] += rightY * eyeX;
+    matrix[11] += rightZ * eyeX;
+
+    if (!write_memory(matrixAddress, matrix, sizeof(matrix))) {
+        return false;
+    }
+
+    if (!g_aerMatrixTouched.exchange(true, std::memory_order_acq_rel)) {
+        log_message("AER probe reached cached FH2 view matrix at camera+0x260");
+    }
+    return true;
+}
+
 void apply_head_look(float forward[4], float yaw, float pitch) {
     // Match the mounted-camera yaw convention already proven by Extra Options.
     const float yawSine = std::sin(-yaw);
@@ -89,9 +226,6 @@ void apply_head_look(float forward[4], float yaw, float pitch) {
     forward[0] = yawCosine * originalX + yawSine * originalZ;
     forward[2] = yawCosine * originalZ - yawSine * originalX;
 
-    // Pitch around the camera-local right axis. Roll is deliberately not part
-    // of the prototype because the confirmed FH2 layout exposes a forward
-    // vector here, not the complete camera basis.
     const float horizontal = std::sqrt(forward[0] * forward[0] + forward[2] * forward[2]);
     if (horizontal < 0.0001f) {
         return;
@@ -106,7 +240,6 @@ void apply_head_look(float forward[4], float yaw, float pitch) {
     const float y = forward[1];
     const float z = forward[2];
 
-    // Rodrigues rotation. right dot forward is zero by construction.
     const float crossX = -rightZ * y;
     const float crossY = rightZ * x - rightX * z;
     const float crossZ = rightX * y;
@@ -138,6 +271,14 @@ void camera_update_hook(void *camera, float dt, unsigned char reset) {
 
     std::memcpy(heading, forward, sizeof(forward));
     *(static_cast<unsigned char *>(camera) + kCameraViewDirtyOffset) = 1;
+
+    if (g_aerEnabled.load(std::memory_order_relaxed)) {
+        const int eye = g_aerNextEye.load(std::memory_order_relaxed) & 1;
+        if (apply_aer_eye_offset(eye)) {
+            g_aerRenderedEye.store(eye, std::memory_order_release);
+            g_aerNextEye.store(eye ^ 1, std::memory_order_relaxed);
+        }
+    }
 }
 
 void publish_pose(const vr::HmdMatrix34_t &matrix, float &referenceYaw, float &referencePitch,
@@ -164,12 +305,36 @@ void publish_pose(const vr::HmdMatrix34_t &matrix, float &referenceYaw, float &r
         log_message("Head pose recentered");
     }
 
-    // FH2's mounted-camera yaw convention is opposite to the OpenVR yaw delta
-    // observed on real HMD hardware. Pitch already matches, so keep it unchanged.
     g_yaw.store(wrap_angle(referenceYaw - yaw), std::memory_order_relaxed);
     g_pitch.store(std::clamp(pitch - referencePitch, -kPitchLimit, kPitchLimit),
                   std::memory_order_relaxed);
     g_poseValid.store(g_trackingEnabled.load(std::memory_order_relaxed), std::memory_order_release);
+}
+
+void update_eye_offsets(vr::IVRSystem *system) {
+    if (!system) {
+        g_eyeOffsetsValid.store(false, std::memory_order_release);
+        return;
+    }
+
+    const vr::HmdMatrix34_t left = system->GetEyeToHeadTransform(vr::Eye_Left);
+    const vr::HmdMatrix34_t right = system->GetEyeToHeadTransform(vr::Eye_Right);
+    const float leftX = left.m[0][3];
+    const float rightX = right.m[0][3];
+    const float separation = std::fabs(rightX - leftX);
+
+    if (!std::isfinite(leftX) || !std::isfinite(rightX) || separation < 0.02f || separation > 0.10f ||
+        std::fabs(leftX) > 0.15f || std::fabs(rightX) > 0.15f) {
+        g_eyeOffsetsValid.store(false, std::memory_order_release);
+        log_message("OpenVR eye offsets look invalid; AER camera offset disabled");
+        return;
+    }
+
+    g_leftEyeX.store(leftX, std::memory_order_relaxed);
+    g_rightEyeX.store(rightX, std::memory_order_relaxed);
+    g_eyeOffsetsValid.store(true, std::memory_order_release);
+    log_message("OpenVR eye offsets: left=" + std::to_string(leftX) +
+                "m right=" + std::to_string(rightX) + "m");
 }
 
 void reset_mock_pose() {
@@ -205,6 +370,8 @@ DWORD WINAPI tracking_thread(void *) {
     bool f7WasDown = false;
     bool f8WasDown = false;
     bool f9WasDown = false;
+    bool f10WasDown = false;
+    bool f11WasDown = false;
     std::string lastInitError;
     std::string lastPreviewError;
     std::string lastCompositorError;
@@ -217,8 +384,9 @@ DWORD WINAPI tracking_thread(void *) {
     bool hasReference = false;
 
     auto shutdown_runtime = [&]() {
-        fh2vr::shutdown_mono_headset_preview();
+        fh2vr::shutdown_headset_preview();
         compositor = nullptr;
+        g_eyeOffsetsValid.store(false, std::memory_order_release);
         if (system) {
             vr::VR_Shutdown();
             system = nullptr;
@@ -237,6 +405,7 @@ DWORD WINAPI tracking_thread(void *) {
             g_poseValid.store(false, std::memory_order_release);
 
             if (mock) {
+                g_aerEnabled.store(false, std::memory_order_relaxed);
                 shutdown_runtime();
                 hasReference = false;
                 reset_mock_pose();
@@ -274,6 +443,9 @@ DWORD WINAPI tracking_thread(void *) {
         if (key_pressed(VK_F9, f9WasDown)) {
             const bool enabled = !g_previewEnabled.load(std::memory_order_relaxed);
             g_previewEnabled.store(enabled, std::memory_order_relaxed);
+            if (!enabled) {
+                g_aerEnabled.store(false, std::memory_order_relaxed);
+            }
             g_poseValid.store(false, std::memory_order_release);
             shutdown_runtime();
             hasReference = false;
@@ -281,8 +453,37 @@ DWORD WINAPI tracking_thread(void *) {
             nextVrRetryAt = 0;
             lastPreviewError.clear();
             lastCompositorError.clear();
-            log_message(enabled ? "Experimental mono headset preview enabled; restarting OpenVR as a scene app"
-                                : "Experimental mono headset preview disabled; returning to tracking-only mode");
+            log_message(enabled ? "Experimental headset preview enabled; restarting OpenVR as a scene app"
+                                : "Headset preview disabled; returning to tracking-only mode");
+        }
+
+        if (key_pressed(VK_F10, f10WasDown)) {
+            const bool enabled = !g_aerEnabled.load(std::memory_order_relaxed);
+            g_aerEnabled.store(enabled, std::memory_order_relaxed);
+            g_aerNextEye.store(0, std::memory_order_relaxed);
+            g_aerRenderedEye.store(0, std::memory_order_relaxed);
+            g_aerMatrixTouched.store(false, std::memory_order_relaxed);
+            if (enabled) {
+                g_previewEnabled.store(true, std::memory_order_relaxed);
+            }
+            g_poseValid.store(false, std::memory_order_release);
+            shutdown_runtime();
+            hasReference = false;
+            g_recenterRequested.store(true, std::memory_order_relaxed);
+            nextVrRetryAt = 0;
+            lastPreviewError.clear();
+            lastCompositorError.clear();
+            log_message(enabled
+                            ? "Experimental AER enabled: alternating cached camera eye offset; F11 swaps eyes"
+                            : "Experimental AER disabled; headset preview remains mono");
+        }
+
+        if (key_pressed(VK_F11, f11WasDown) && g_aerEnabled.load(std::memory_order_relaxed)) {
+            const bool swapped = !g_aerSwapEyes.load(std::memory_order_relaxed);
+            g_aerSwapEyes.store(swapped, std::memory_order_relaxed);
+            fh2vr::shutdown_headset_preview();
+            log_message(swapped ? "AER retained eye assignment swapped"
+                                : "AER retained eye assignment restored");
         }
 
         if (g_mockMode.load(std::memory_order_relaxed)) {
@@ -308,6 +509,7 @@ DWORD WINAPI tracking_thread(void *) {
                     }
                     nextVrRetryAt = now + kVrRetryMs;
                 } else {
+                    update_eye_offsets(system);
                     compositor = preview ? vr::VRCompositor() : nullptr;
                     if (preview && !compositor) {
                         log_message("OpenVR scene initialized but VRCompositor is unavailable; retrying");
@@ -318,7 +520,7 @@ DWORD WINAPI tracking_thread(void *) {
                         hasReference = false;
                         g_recenterRequested.store(true, std::memory_order_relaxed);
                         log_message(preview
-                                        ? "SteamVR scene/compositor connected; F9 toggles mono headset preview"
+                                        ? "SteamVR scene/compositor connected; F9 preview, F10 AER, F11 swap eyes"
                                         : "SteamVR/OpenVR tracking connected; F6 mock, F7 toggle, F8 recenter, F9 preview");
                     }
                 }
@@ -366,13 +568,20 @@ DWORD WINAPI tracking_thread(void *) {
 
         if (preview && compositor) {
             std::string previewError;
-            if (!fh2vr::submit_mono_headset_preview(compositor, previewError)) {
+            const bool aer = g_aerEnabled.load(std::memory_order_relaxed) &&
+                             g_eyeOffsetsValid.load(std::memory_order_acquire);
+            int sourceEye = g_aerRenderedEye.load(std::memory_order_acquire) & 1;
+            if (g_aerSwapEyes.load(std::memory_order_relaxed)) {
+                sourceEye ^= 1;
+            }
+
+            if (!fh2vr::submit_headset_preview(compositor, aer, sourceEye, previewError)) {
                 if (previewError != lastPreviewError) {
-                    log_message("Mono headset preview: " + previewError);
+                    log_message("Headset preview: " + previewError);
                     lastPreviewError = previewError;
                 }
             } else if (!lastPreviewError.empty()) {
-                log_message("Mono headset preview recovered");
+                log_message("Headset preview recovered");
                 lastPreviewError.clear();
             }
         } else {
@@ -452,6 +661,7 @@ extern "C" __declspec(dllexport) int FH2ML_Initialize(const FH2ML_HostAPI *api) 
         log_message("FH2ML did not provide a validated FH2 game module");
         return 0;
     }
+    g_gameBase = gameBase;
 
     if (!install_camera_hook(gameBase)) {
         return 0;
@@ -467,7 +677,7 @@ extern "C" __declspec(dllexport) int FH2ML_Initialize(const FH2ML_HostAPI *api) 
     }
     CloseHandle(thread);
 
-    log_message("FH2VR 0.2.1-dev initialized: F6 mock, F7 toggle, F8 recenter, F9 mono preview");
+    log_message("FH2VR 0.3.0-dev initialized: F6 mock, F7 toggle, F8 recenter, F9 preview, F10 AER, F11 swap");
     return 1;
 }
 
