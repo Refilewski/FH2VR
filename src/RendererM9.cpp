@@ -174,7 +174,7 @@ vr::HmdMatrix34_t roll_neutral_pose_m9(const vr::HmdMatrix34_t &input,
 
 struct GuiStateM9 {
     bool manualEnabled = false;
-    bool f5WasDown = false;
+    bool f2WasDown = false;
     bool automaticEnabled = false;
     bool visible = false;
     std::uintptr_t gameBase = 0;
@@ -317,8 +317,8 @@ bool submit_overlay_once_m9(ID3D12Resource *texture,
     vr::EVROverlayError result =
         overlay->SetOverlayTexture(g_guiM9.handle, &submitted);
     if (result == vr::VROverlayError_InvalidHandle) {
-        // F6/F9 restarts OpenVR. Overlay handles are session-local, so never
-        // keep using the old numeric handle after a runtime restart.
+        // F1/runtime restarts OpenVR. Overlay handles are session-local, so
+        // never keep using the old numeric handle after a runtime restart.
         invalidate_overlay_handle_m9(false);
         if (!ensure_overlay_m9(error)) {
             return false;
@@ -668,14 +668,14 @@ void sample_automatic_ui_m9() {
 }
 
 bool poll_gui_m9() {
-    const bool down = (GetAsyncKeyState(VK_F5) & 0x8000) != 0;
-    if (down && !g_guiM9.f5WasDown) {
+    const bool down = (GetAsyncKeyState(VK_F2) & 0x8000) != 0;
+    if (down && !g_guiM9.f2WasDown) {
         g_guiM9.manualEnabled = !g_guiM9.manualEnabled;
         log_line(g_guiM9.manualEnabled
-                     ? "M9 F5: manual HUD/GUI overlay force enabled"
-                     : "M9 F5: manual HUD/GUI overlay force disabled");
+                     ? "M9 F2: manual HUD/GUI overlay force enabled"
+                     : "M9 F2: manual HUD/GUI overlay force disabled");
     }
-    g_guiM9.f5WasDown = down;
+    g_guiM9.f2WasDown = down;
     sample_automatic_ui_m9();
     return g_guiM9.manualEnabled || g_guiM9.automaticEnabled;
 }
@@ -713,7 +713,7 @@ void log_projection_once_m9(const ProjectionM9 &p,
     char buffer[900]{};
     std::snprintf(
         buffer, sizeof(buffer),
-        "M9 projection/FOV: HMD=%.2fx%.2f deg; FH2=%llux%u aspect=%.5f target=%.2fx%.2f deg; GUI=auto frozen-world + F5 live HUD",
+        "M9 projection/FOV: HMD=%.2fx%.2f deg; FH2=%llux%u aspect=%.5f target=%.2fx%.2f deg; GUI=auto frozen-world + F2 live HUD",
         p.combinedHorizontalFovRadians * kRadToDeg,
         p.combinedVerticalFovRadians * kRadToDeg,
         static_cast<unsigned long long>(desc.Width), desc.Height,
