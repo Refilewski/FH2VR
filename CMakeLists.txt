@@ -32,9 +32,8 @@ FetchContent_MakeAvailable(minhook)
 add_library(FH2VR SHARED
   src/FH2VR.cpp
   src/HeadsetPreview.cpp
-  src/RendererM5.cpp
+  src/RendererM6.cpp
   src/FovMatch.cpp
-  src/CameraProbeFixed.cpp
 )
 target_include_directories(FH2VR PRIVATE include)
 target_compile_definitions(FH2VR PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX OPENVR_BUILD_STATIC)
