@@ -13,7 +13,7 @@
 
 namespace {
 constexpr char kModId[] = "fh2vr";
-constexpr char kVersion[] = "0.2.0-dev";
+constexpr char kVersion[] = "0.2.1-dev";
 
 // Forza Horizon 2 Xbox One 1.0.0.64 camera layout, confirmed against the
 // camera hooks used by ForzaHorizon2_ExtraOptions.
@@ -467,7 +467,7 @@ extern "C" __declspec(dllexport) int FH2ML_Initialize(const FH2ML_HostAPI *api) 
     }
     CloseHandle(thread);
 
-    log_message("FH2VR 0.2.0-dev initialized: F6 mock, F7 toggle, F8 recenter, F9 mono preview");
+    log_message("FH2VR 0.2.1-dev initialized: F6 mock, F7 toggle, F8 recenter, F9 mono preview");
     return 1;
 }
 
