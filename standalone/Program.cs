@@ -1,5 +1,8 @@
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Drawing;
+using System.Runtime.InteropServices;
+using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Windows.Forms;
@@ -20,7 +23,7 @@ internal static class Program
             return;
 
         using var log = FileLog.Open();
-        log.Write($"FH2VR {Version} standalone launcher started");
+        log.Write($"FH2VR {Version} standalone injector started");
 
         try
         {
@@ -34,7 +37,7 @@ internal static class Program
         }
         finally
         {
-            log.Write("FH2VR standalone launcher stopped");
+            log.Write("FH2VR standalone injector stopped");
         }
     }
 }
@@ -45,10 +48,13 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly LauncherSettings _settings;
     private readonly NotifyIcon _tray;
     private readonly ToolStripMenuItem _status;
-    private readonly ToolStripMenuItem _install;
-    private readonly ToolStripMenuItem _restore;
+    private readonly ToolStripMenuItem _attach;
     private readonly ToolStripMenuItem _launch;
     private readonly System.Windows.Forms.Timer _timer;
+
+    private int? _attachedPid;
+    private int? _lastAttemptPid;
+    private DateTime _nextAttemptUtc = DateTime.MinValue;
     private int _exiting;
 
     internal TrayApplicationContext(FileLog log)
@@ -61,16 +67,14 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
         var menu = new ContextMenuStrip();
         menu.Items.Add(new ToolStripMenuItem($"FH2VR {Program.Version}") { Enabled = false });
-        _status = new ToolStripMenuItem("Checking installation...") { Enabled = false };
+        _status = new ToolStripMenuItem("Waiting for Azimuth...") { Enabled = false };
         menu.Items.Add(_status);
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add("Select Azimuth folder...", null, (_, _) => SelectAzimuthFolder());
-        _install = new ToolStripMenuItem("Install / Repair FH2VR", null, (_, _) => Install());
-        _restore = new ToolStripMenuItem("Restore original Azimuth helper", null, (_, _) => Restore());
-        _launch = new ToolStripMenuItem("Launch Azimuth", null, (_, _) => Launch());
-        menu.Items.Add(_install);
-        menu.Items.Add(_restore);
+        _attach = new ToolStripMenuItem("Attach now", null, (_, _) => AttachNow(showErrors: true));
+        _launch = new ToolStripMenuItem("Launch Azimuth", null, (_, _) => LaunchAzimuth());
+        menu.Items.Add(_attach);
         menu.Items.Add(_launch);
+        menu.Items.Add("Select Azimuth folder...", null, (_, _) => SelectAzimuthFolder());
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Open FH2VR logs", null, (_, _) => OpenLogs());
         menu.Items.Add("Exit", null, (_, _) => Exit());
@@ -82,21 +86,122 @@ internal sealed class TrayApplicationContext : ApplicationContext
             Visible = true,
             ContextMenuStrip = menu
         };
-
-        _tray.DoubleClick += (_, _) => Launch();
+        _tray.DoubleClick += (_, _) => AttachNow(showErrors: true);
 
         _timer = new System.Windows.Forms.Timer { Interval = 1000 };
-        _timer.Tick += (_, _) => RefreshStatus();
+        _timer.Tick += (_, _) => Tick();
         _timer.Start();
 
-        if (string.IsNullOrWhiteSpace(_settings.AzimuthDirectory) ||
-            !File.Exists(Path.Combine(_settings.AzimuthDirectory, "azimuth.exe")))
+        Tick();
+    }
+
+    private string RuntimePath
+        => Path.Combine(AppContext.BaseDirectory, "Payload", "FH2VR.dll");
+
+    private void Tick()
+    {
+        Process? process = FindNewestAzimuth();
+        if (process is null)
         {
-            _status.Text = "Select your Azimuth folder";
+            _attachedPid = null;
+            _lastAttemptPid = null;
+            _status.Text = "Waiting for azimuth.exe";
+            _attach.Enabled = false;
+            SetTrayText("FH2VR — waiting for Azimuth");
+            return;
         }
-        else
+
+        using (process)
         {
-            RefreshStatus();
+            _attach.Enabled = true;
+
+            if (_attachedPid == process.Id)
+            {
+                _status.Text = $"Attached · PID {process.Id} · F1 VR / F2 GUI";
+                SetTrayText("FH2VR — attached");
+                return;
+            }
+
+            if (RemoteRuntime.IsModuleLoaded(process.Id, "FH2VR.dll"))
+            {
+                _attachedPid = process.Id;
+                _status.Text = $"FH2VR already loaded · PID {process.Id}";
+                SetTrayText("FH2VR — runtime loaded");
+                return;
+            }
+
+            _status.Text = $"Azimuth detected · PID {process.Id} · attaching...";
+            SetTrayText("FH2VR — attaching");
+
+            if ((_lastAttemptPid != process.Id || DateTime.UtcNow >= _nextAttemptUtc) &&
+                File.Exists(RuntimePath))
+            {
+                _lastAttemptPid = process.Id;
+                _nextAttemptUtc = DateTime.UtcNow.AddSeconds(5);
+                TryAttach(process, showErrors: false);
+            }
+            else if (!File.Exists(RuntimePath))
+            {
+                _status.Text = "Payload/FH2VR.dll is missing";
+                SetTrayText("FH2VR — runtime missing");
+            }
+        }
+    }
+
+    private void AttachNow(bool showErrors)
+    {
+        Process? process = FindNewestAzimuth();
+        if (process is null)
+        {
+            if (showErrors)
+                MessageBox.Show("azimuth.exe is not running.", "FH2VR",
+                                MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        using (process)
+            TryAttach(process, showErrors);
+    }
+
+    private void TryAttach(Process process, bool showErrors)
+    {
+        try
+        {
+            if (!File.Exists(RuntimePath))
+                throw new FileNotFoundException("Standalone runtime is missing from Payload/FH2VR.dll.", RuntimePath);
+
+            if (RemoteRuntime.IsModuleLoaded(process.Id, "FH2VR.dll"))
+            {
+                _attachedPid = process.Id;
+                _log.Write($"PID {process.Id}: FH2VR.dll is already loaded; not injecting a duplicate");
+                return;
+            }
+
+            _log.Write($"Attaching FH2VR runtime to azimuth PID {process.Id}");
+            RemoteRuntime.LoadAndStart(process.Id, RuntimePath, "FH2VR_StandaloneInitialize");
+            _attachedPid = process.Id;
+            _lastAttemptPid = process.Id;
+            _status.Text = $"Attached · PID {process.Id} · F1 VR / F2 GUI";
+            SetTrayText("FH2VR — attached");
+            _log.Write($"Standalone runtime initialized in PID {process.Id}");
+
+            _tray.BalloonTipTitle = "FH2VR attached";
+            _tray.BalloonTipText = "Press F1 for VR and F2 for the manual GUI/HUD overlay.";
+            _tray.ShowBalloonTip(2500);
+        }
+        catch (Exception ex)
+        {
+            _attachedPid = null;
+            _status.Text = "Attach failed · see logs";
+            SetTrayText("FH2VR — attach failed");
+            _log.Write($"Attach to PID {process.Id} failed: {ex}");
+
+            if (showErrors)
+            {
+                MessageBox.Show(
+                    ex.Message + "\n\nIf Azimuth is running as administrator, run FH2VR with the same privilege level.",
+                    "FH2VR attach failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
         }
     }
 
@@ -124,172 +229,29 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _settings.AzimuthDirectory = selected;
         _settings.Save(_log);
         _log.Write($"Azimuth directory selected: {selected}");
-        RefreshStatus();
     }
 
-    private void RefreshStatus()
-    {
-        string? root = ValidRoot();
-        if (root is null)
-        {
-            _status.Text = "Azimuth folder not configured";
-            _install.Enabled = false;
-            _restore.Enabled = false;
-            _launch.Enabled = false;
-            SetTrayText("FH2VR — select Azimuth folder");
-            return;
-        }
-
-        _install.Enabled = !AzimuthRunning();
-        _launch.Enabled = true;
-
-        string bin = Path.Combine(root, "data", "bin");
-        string runtime = Path.Combine(bin, "FH2VR.dll");
-        string backup = Path.Combine(bin, "azimuth-tls.dll.fh2vr-original");
-        string state = Path.Combine(root, "FH2VR", "installation.json");
-        bool installed = File.Exists(runtime) && File.Exists(backup) && File.Exists(state);
-        bool running = AzimuthRunning();
-
-        _restore.Enabled = File.Exists(backup) && !running;
-
-        if (running && installed)
-            _status.Text = "Azimuth running · FH2VR installed";
-        else if (running)
-            _status.Text = "Azimuth running · stop it before installing";
-        else if (installed)
-            _status.Text = "FH2VR installed · ready";
-        else
-            _status.Text = "FH2VR standalone not installed";
-
-        SetTrayText("FH2VR — " + _status.Text);
-    }
-
-    private void Install()
+    private void LaunchAzimuth()
     {
         try
         {
-            string root = RequireRoot();
-            if (AzimuthRunning())
-                throw new InvalidOperationException("Close Azimuth before installing or repairing FH2VR.");
-
-            string payload = Path.Combine(AppContext.BaseDirectory, "Payload");
-            string payloadRuntime = Path.Combine(payload, "FH2VR.dll");
-            string payloadBootstrap = Path.Combine(payload, "FH2VR.Bootstrap.dll");
-
-            if (!File.Exists(payloadRuntime))
-                throw new FileNotFoundException("FH2VR runtime payload is missing.", payloadRuntime);
-            if (!File.Exists(payloadBootstrap))
-                throw new FileNotFoundException(
-                    "The standalone bootstrap payload is not included in this build yet. " +
-                    "The launcher and FH2VR standalone runtime are ready, but the Azimuth startup bridge still needs to be added.",
-                    payloadBootstrap);
-
-            string bin = Path.Combine(root, "data", "bin");
-            Directory.CreateDirectory(bin);
-
-            string liveHelper = Path.Combine(bin, "azimuth-tls.dll");
-            string backupHelper = Path.Combine(bin, "azimuth-tls.dll.fh2vr-original");
-            string runtimeTarget = Path.Combine(bin, "FH2VR.dll");
-            string stateDirectory = Path.Combine(root, "FH2VR");
-            string statePath = Path.Combine(stateDirectory, "installation.json");
-
-            if (!File.Exists(liveHelper))
-                throw new InvalidOperationException("Azimuth data/bin/azimuth-tls.dll was not found.");
-
-            if (!File.Exists(backupHelper))
+            string? root = _settings.AzimuthDirectory;
+            if (string.IsNullOrWhiteSpace(root) || !File.Exists(Path.Combine(root, "azimuth.exe")))
             {
-                File.Copy(liveHelper, backupHelper, overwrite: false);
-                _log.Write("Backed up original azimuth-tls.dll");
+                SelectAzimuthFolder();
+                root = _settings.AzimuthDirectory;
             }
 
-            string stagedRuntime = runtimeTarget + ".new";
-            string stagedBootstrap = liveHelper + ".new";
-            File.Copy(payloadRuntime, stagedRuntime, overwrite: true);
-            File.Copy(payloadBootstrap, stagedBootstrap, overwrite: true);
+            if (string.IsNullOrWhiteSpace(root))
+                return;
 
-            File.Move(stagedRuntime, runtimeTarget, overwrite: true);
-            File.Move(stagedBootstrap, liveHelper, overwrite: true);
-
-            Directory.CreateDirectory(stateDirectory);
-            var state = new InstallationState
-            {
-                Version = Program.Version,
-                InstalledUtc = DateTimeOffset.UtcNow,
-                AzimuthDirectory = root,
-                RuntimePath = Path.GetRelativePath(root, runtimeTarget),
-                OriginalHelperBackup = Path.GetRelativePath(root, backupHelper)
-            };
-            File.WriteAllText(statePath, JsonSerializer.Serialize(state, JsonOptions.Pretty));
-
-            _log.Write("FH2VR standalone installed successfully");
-            MessageBox.Show("FH2VR standalone installed. Launch Azimuth, then press F1 in game.",
-                            "FH2VR", MessageBoxButtons.OK, MessageBoxIcon.Information);
-        }
-        catch (Exception ex)
-        {
-            _log.Write($"Install failed: {ex.Message}");
-            MessageBox.Show(ex.Message, "FH2VR install failed",
-                            MessageBoxButtons.OK, MessageBoxIcon.Error);
-        }
-        finally
-        {
-            RefreshStatus();
-        }
-    }
-
-    private void Restore()
-    {
-        try
-        {
-            string root = RequireRoot();
-            if (AzimuthRunning())
-                throw new InvalidOperationException("Close Azimuth before restoring its original helper.");
-
-            string bin = Path.Combine(root, "data", "bin");
-            string liveHelper = Path.Combine(bin, "azimuth-tls.dll");
-            string backupHelper = Path.Combine(bin, "azimuth-tls.dll.fh2vr-original");
-            string runtimeTarget = Path.Combine(bin, "FH2VR.dll");
-            string stateDirectory = Path.Combine(root, "FH2VR");
-
-            if (!File.Exists(backupHelper))
-                throw new InvalidOperationException("No FH2VR original-helper backup exists for this Azimuth installation.");
-
-            File.Copy(backupHelper, liveHelper, overwrite: true);
-            File.Delete(backupHelper);
-            if (File.Exists(runtimeTarget))
-                File.Delete(runtimeTarget);
-            if (Directory.Exists(stateDirectory))
-                Directory.Delete(stateDirectory, recursive: true);
-
-            _log.Write("Restored original Azimuth helper and removed standalone FH2VR runtime");
-            MessageBox.Show("Original Azimuth helper restored.",
-                            "FH2VR", MessageBoxButtons.OK, MessageBoxIcon.Information);
-        }
-        catch (Exception ex)
-        {
-            _log.Write($"Restore failed: {ex.Message}");
-            MessageBox.Show(ex.Message, "FH2VR restore failed",
-                            MessageBoxButtons.OK, MessageBoxIcon.Error);
-        }
-        finally
-        {
-            RefreshStatus();
-        }
-    }
-
-    private void Launch()
-    {
-        try
-        {
-            string root = RequireRoot();
-            string exe = Path.Combine(root, "azimuth.exe");
             Process.Start(new ProcessStartInfo
             {
-                FileName = exe,
+                FileName = Path.Combine(root, "azimuth.exe"),
                 WorkingDirectory = root,
                 UseShellExecute = true
             });
-            _log.Write("Launched Azimuth");
+            _log.Write("Launched Azimuth; auto-attach will run when the process is ready");
         }
         catch (Exception ex)
         {
@@ -315,36 +277,39 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
     }
 
-    private string? ValidRoot()
+    private static Process? FindNewestAzimuth()
     {
-        string? root = _settings.AzimuthDirectory;
-        return !string.IsNullOrWhiteSpace(root) && File.Exists(Path.Combine(root, "azimuth.exe"))
-            ? root
-            : null;
-    }
+        Process[] all = Process.GetProcessesByName("azimuth");
+        Process? selected = null;
+        DateTime newest = DateTime.MinValue;
 
-    private string RequireRoot()
-        => ValidRoot() ?? throw new InvalidOperationException("Select the Azimuth folder first.");
-
-    private static bool AzimuthRunning()
-    {
-        try
+        foreach (Process process in all)
         {
-            Process[] processes = Process.GetProcessesByName("azimuth");
-            foreach (Process process in processes)
+            try
+            {
+                DateTime start = process.StartTime;
+                if (start > newest)
+                {
+                    selected?.Dispose();
+                    selected = process;
+                    newest = start;
+                }
+                else
+                {
+                    process.Dispose();
+                }
+            }
+            catch
+            {
                 process.Dispose();
-            return processes.Length != 0;
+            }
         }
-        catch
-        {
-            return false;
-        }
+
+        return selected;
     }
 
     private void SetTrayText(string text)
-    {
-        _tray.Text = text.Length <= 63 ? text : text[..63];
-    }
+        => _tray.Text = text.Length <= 63 ? text : text[..63];
 
     private void Exit()
     {
@@ -365,6 +330,234 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
         base.Dispose(disposing);
     }
+}
+
+internal static class RemoteRuntime
+{
+    private const uint ProcessCreateThread = 0x0002;
+    private const uint ProcessQueryInformation = 0x0400;
+    private const uint ProcessVmOperation = 0x0008;
+    private const uint ProcessVmWrite = 0x0020;
+    private const uint ProcessVmRead = 0x0010;
+    private const uint MemCommit = 0x1000;
+    private const uint MemReserve = 0x2000;
+    private const uint MemRelease = 0x8000;
+    private const uint PageReadWrite = 0x04;
+    private const uint WaitObject0 = 0x00000000;
+    private const uint WaitTimeout = 0x00000102;
+    private const uint Infinite = 0xFFFFFFFF;
+    private const uint Th32csSnapModule = 0x00000008;
+    private const uint Th32csSnapModule32 = 0x00000010;
+    private const uint DontResolveDllReferences = 0x00000001;
+
+    internal static void LoadAndStart(int processId, string runtimePath, string exportName)
+    {
+        string fullPath = Path.GetFullPath(runtimePath);
+        IntPtr process = OpenProcess(
+            ProcessCreateThread | ProcessQueryInformation | ProcessVmOperation | ProcessVmWrite | ProcessVmRead,
+            false, processId);
+        if (process == IntPtr.Zero)
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "OpenProcess failed");
+
+        try
+        {
+            byte[] pathBytes = Encoding.Unicode.GetBytes(fullPath + "\0");
+            IntPtr remotePath = VirtualAllocEx(process, IntPtr.Zero, (nuint)pathBytes.Length,
+                                               MemCommit | MemReserve, PageReadWrite);
+            if (remotePath == IntPtr.Zero)
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "VirtualAllocEx failed");
+
+            try
+            {
+                if (!WriteProcessMemory(process, remotePath, pathBytes, (nuint)pathBytes.Length, out nuint written) ||
+                    written != (nuint)pathBytes.Length)
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "WriteProcessMemory failed");
+
+                IntPtr remoteLoadLibrary = RemoteProcAddress(processId, "kernel32.dll", "LoadLibraryW");
+                RunRemoteThread(process, remoteLoadLibrary, remotePath, "LoadLibraryW");
+            }
+            finally
+            {
+                VirtualFreeEx(process, remotePath, 0, MemRelease);
+            }
+
+            IntPtr remoteRuntime = WaitForModule(processId, Path.GetFileName(fullPath), TimeSpan.FromSeconds(5));
+            if (remoteRuntime == IntPtr.Zero)
+                throw new InvalidOperationException("FH2VR.dll was not visible in the Azimuth module list after loading.");
+
+            IntPtr localRuntime = LoadLibraryExW(fullPath, IntPtr.Zero, DontResolveDllReferences);
+            if (localRuntime == IntPtr.Zero)
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not map FH2VR.dll locally to resolve its standalone export");
+
+            try
+            {
+                IntPtr localExport = GetProcAddress(localRuntime, exportName);
+                if (localExport == IntPtr.Zero)
+                    throw new InvalidOperationException($"FH2VR runtime does not export {exportName}.");
+
+                long exportRva = localExport.ToInt64() - localRuntime.ToInt64();
+                IntPtr remoteExport = new(remoteRuntime.ToInt64() + exportRva);
+                uint result = RunRemoteThread(process, remoteExport, IntPtr.Zero, exportName);
+                if (result == 0)
+                    throw new InvalidOperationException($"{exportName} returned failure inside Azimuth.");
+            }
+            finally
+            {
+                FreeLibrary(localRuntime);
+            }
+        }
+        finally
+        {
+            CloseHandle(process);
+        }
+    }
+
+    internal static bool IsModuleLoaded(int processId, string moduleName)
+        => FindModule(processId, moduleName) != IntPtr.Zero;
+
+    private static IntPtr WaitForModule(int processId, string moduleName, TimeSpan timeout)
+    {
+        Stopwatch stopwatch = Stopwatch.StartNew();
+        while (stopwatch.Elapsed < timeout)
+        {
+            IntPtr module = FindModule(processId, moduleName);
+            if (module != IntPtr.Zero)
+                return module;
+            Thread.Sleep(25);
+        }
+        return IntPtr.Zero;
+    }
+
+    private static IntPtr RemoteProcAddress(int processId, string moduleName, string procName)
+    {
+        IntPtr remoteModule = FindModule(processId, moduleName);
+        if (remoteModule == IntPtr.Zero)
+            throw new InvalidOperationException($"Remote module {moduleName} was not found.");
+
+        IntPtr localModule = GetModuleHandleW(moduleName);
+        if (localModule == IntPtr.Zero)
+            throw new Win32Exception(Marshal.GetLastWin32Error(), $"Local module {moduleName} was not found");
+
+        IntPtr localProc = GetProcAddress(localModule, procName);
+        if (localProc == IntPtr.Zero)
+            throw new Win32Exception(Marshal.GetLastWin32Error(), $"Local export {procName} was not found");
+
+        long rva = localProc.ToInt64() - localModule.ToInt64();
+        return new IntPtr(remoteModule.ToInt64() + rva);
+    }
+
+    private static IntPtr FindModule(int processId, string moduleName)
+    {
+        IntPtr snapshot = CreateToolhelp32Snapshot(Th32csSnapModule | Th32csSnapModule32, (uint)processId);
+        if (snapshot == new IntPtr(-1))
+            return IntPtr.Zero;
+
+        try
+        {
+            MODULEENTRY32 entry = new() { dwSize = (uint)Marshal.SizeOf<MODULEENTRY32>() };
+            if (!Module32FirstW(snapshot, ref entry))
+                return IntPtr.Zero;
+
+            do
+            {
+                if (string.Equals(entry.szModule, moduleName, StringComparison.OrdinalIgnoreCase))
+                    return entry.modBaseAddr;
+                entry.dwSize = (uint)Marshal.SizeOf<MODULEENTRY32>();
+            }
+            while (Module32NextW(snapshot, ref entry));
+
+            return IntPtr.Zero;
+        }
+        finally
+        {
+            CloseHandle(snapshot);
+        }
+    }
+
+    private static uint RunRemoteThread(IntPtr process, IntPtr startAddress, IntPtr parameter, string operation)
+    {
+        IntPtr thread = CreateRemoteThread(process, IntPtr.Zero, 0, startAddress, parameter, 0, out _);
+        if (thread == IntPtr.Zero)
+            throw new Win32Exception(Marshal.GetLastWin32Error(), $"CreateRemoteThread failed for {operation}");
+
+        try
+        {
+            uint wait = WaitForSingleObject(thread, 10000);
+            if (wait == WaitTimeout)
+                throw new TimeoutException($"Remote {operation} thread timed out.");
+            if (wait != WaitObject0)
+                throw new Win32Exception(Marshal.GetLastWin32Error(), $"Waiting for remote {operation} thread failed");
+            if (!GetExitCodeThread(thread, out uint exitCode))
+                throw new Win32Exception(Marshal.GetLastWin32Error(), $"Could not read remote {operation} result");
+            return exitCode;
+        }
+        finally
+        {
+            CloseHandle(thread);
+        }
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct MODULEENTRY32
+    {
+        public uint dwSize;
+        public uint th32ModuleID;
+        public uint th32ProcessID;
+        public uint GlblcntUsage;
+        public uint ProccntUsage;
+        public IntPtr modBaseAddr;
+        public uint modBaseSize;
+        public IntPtr hModule;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)] public string szModule;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)] public string szExePath;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr OpenProcess(uint desiredAccess, bool inheritHandle, int processId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr VirtualAllocEx(IntPtr process, IntPtr address, nuint size, uint allocationType, uint protect);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool VirtualFreeEx(IntPtr process, IntPtr address, nuint size, uint freeType);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool WriteProcessMemory(IntPtr process, IntPtr address, byte[] buffer, nuint size, out nuint written);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr CreateRemoteThread(IntPtr process, IntPtr attributes, nuint stackSize,
+                                                     IntPtr startAddress, IntPtr parameter,
+                                                     uint creationFlags, out uint threadId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetExitCodeThread(IntPtr thread, out uint exitCode);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint processId);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool Module32FirstW(IntPtr snapshot, ref MODULEENTRY32 entry);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool Module32NextW(IntPtr snapshot, ref MODULEENTRY32 entry);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr GetModuleHandleW(string moduleName);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Ansi, SetLastError = true)]
+    private static extern IntPtr GetProcAddress(IntPtr module, string procName);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr LoadLibraryExW(string fileName, IntPtr file, uint flags);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool FreeLibrary(IntPtr module);
 }
 
 internal sealed class LauncherSettings
@@ -405,15 +598,6 @@ internal sealed class LauncherSettings
     private static string SettingsPath =>
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
                      "FH2VR", "settings.json");
-}
-
-internal sealed class InstallationState
-{
-    public string Version { get; set; } = string.Empty;
-    public DateTimeOffset InstalledUtc { get; set; }
-    public string AzimuthDirectory { get; set; } = string.Empty;
-    public string RuntimePath { get; set; } = string.Empty;
-    public string OriginalHelperBackup { get; set; } = string.Empty;
 }
 
 internal static class JsonOptions
