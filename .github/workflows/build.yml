@@ -34,7 +34,14 @@ jobs:
       - name: Verify clean package
         shell: pwsh
         run: |
-          $expected = @('FH2VR.dll', 'mod.json', 'README.md', 'THIRD_PARTY.md') | Sort-Object
+          $expected = @(
+            'FH2VR.dll',
+            'mod.json',
+            'README.md',
+            'THIRD_PARTY.md',
+            'OpenVR-LICENSE.txt',
+            'MinHook-LICENSE.txt'
+          ) | Sort-Object
           $actual = Get-ChildItem package -File -Recurse | ForEach-Object { $_.Name } | Sort-Object
           if ($actual.Count -ne $expected.Count) {
             throw "Unexpected package file count: $($actual.Count). Actual: $($actual -join ', ')"
