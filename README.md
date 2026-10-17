@@ -1,85 +1,51 @@
 # FH2VR
 
-Experimental VR/head-tracking mod for **Forza Horizon 2 Xbox One 1.0.0.64 on Azimuth**, built as a native FH2ML mod.
+Experimental VR mod for **Forza Horizon 2 Xbox One 1.0.0.64 running through Azimuth/FH2ML**.
 
-## Current status: 0.4.0-dev renderer prototype
+## Current status: 0.4.0-dev
 
-FH2VR now has a native D3D12 -> OpenVR path. Live testing on Quest 3 has confirmed:
+Live on Quest 3 / SteamVR / wired Meta Link:
 
-- live SteamVR/OpenVR HMD orientation tracking;
-- Driver/cockpit head yaw and pitch through the FH2 camera hook;
-- FH2/Azimuth presents through **D3D12**;
-- the game swapchain is **1920x1080, R10G10B10A2_UNORM, 3 buffers**;
-- the real FH2 DIRECT command queue can be captured through `ExecuteCommandLists`;
-- the current backbuffer can be copied every Present;
-- `R10G10B10A2_UNORM` is rejected by SteamVR with compositor error 105, so FH2VR converts it on-GPU to **R8G8B8A8_UNORM**;
-- the converted D3D12 texture successfully displays in Quest 3 through `TextureType_DirectX12` and `Submit_TextureWithPose`.
+- native FH2 D3D12 backbuffer capture;
+- GPU conversion from `R10G10B10A2_UNORM` to OpenVR-friendly `R8G8B8A8_UNORM`;
+- per-eye OpenVR projection bounds from `GetProjectionRaw()`;
+- FH2 Driver-camera FOV matched to the Quest frustum;
+- yaw/pitch head tracking in the FH2 camera;
+- roll-neutral compositor pose so the world does not tilt with your head;
+- stable-frame pose reprojection for smoother HMD motion;
+- automatic flat GUI/menu overlay using FH2 UI-state detection ported from Azimuth-RPC;
+- M9 resilient overlay recreation after OpenVR restarts;
+- M9 frozen gameplay frame behind automatically detected menus to avoid the old menu-on-menu scene duplication.
 
-The remaining major visual problem is a strong cross-eye / projection mismatch. Removing GDI/BitBlt did not remove it, so the current focus is projection/FOV rather than capture.
-
-## Current M4.1 projection + FOV diagnostic
-
-M4 keeps the proven M3 D3D12 capture + R10->R8 conversion path and changes only the OpenVR submit stage.
-
-It reads:
-
-```text
-IVRSystem::GetProjectionRaw(Eye_Left)
-IVRSystem::GetProjectionRaw(Eye_Right)
-```
-
-and builds the combined tangent frustum using the same construction used by Valve's SteamVR sample. The same mono frame is then submitted with **different `VRTextureBounds_t` for left and right eyes**.
-
-The renderer log records:
-
-```text
-M4 OpenVR projection raw: L=[...] R=[...]
-combinedFov=...x... deg
-tanHalf=(...,...)
-boundsL=[...]
-boundsR=[...]
-M4 OpenVR per-eye projection submit OK
-```
-
-M4.1 additionally logs the live FH2 Driver-camera FOV path without changing it:
-
-```text
-Driver FOV diagnostic: callback=... result=... camera+0x1D0=... rad (... deg)
-```
-
-This lets one runtime test compare the HMD-required combined frustum against FH2's actual mounted-camera FOV.
-
-This is still a projection diagnostic, not true stereo rendering.
-
-## Confirmed camera/FOV data
-
-Relevant confirmed FH2/Extra Options data:
-
-- Driver camera vtable: `0x2E78120`
-- Driver update slot: `0x20`
-- Driver FOV callback slot: `0x70`
-- Driver heading/forward: `camera + 0x1C0`
-- mounted-camera base FOV: `camera + 0x1D0`
-- view-dirty byte: `camera + 0x21A`
-- native mounted-camera FOV routine: `0x10340F0`
-- player manager global: `0x34ABA60`
-- cached active-view camera matrix: separate camera object at `+0x260`
-
-The old `camera+0x260` AER path is kept only as a diagnostic. At the observed ~32-36 FPS game rate, alternate-eye rendering would provide only ~16-18 newly rendered frames per eye, so it is no longer the primary VR plan.
+The current renderer is still mono scene rendering rather than true geometric stereo/depth reprojection, but the live VR path is usable and smooth with sensible FH2 graphics settings.
 
 ## Controls
 
-- **F6** — toggle keyboard mock head tracking
-- **Left / Right Arrow** — mock yaw
-- **Up / Down Arrow** — mock pitch
-- **F7** — toggle head tracking globally
-- **F8** — recenter
-- **F9** — toggle headset preview / native D3D12 OpenVR submission
-- **F10** — legacy experimental AER toggle
-- **F11** — legacy AER compositor eye swap
-- **F12** — legacy x15 matrix perturbation + Driver camera scan request
+FH2VR intentionally exposes **only two keys**:
 
-For current M4/M4.1 testing, use **F9 only** unless specifically testing one of the legacy diagnostics.
+- **F1** — toggle VR ON/OFF. Enabling VR also enables head tracking and automatically recenters the current head pose.
+- **F2** — toggle the manual HUD/GUI flat overlay. Automatic menu/map/garage/loading detection works independently and does not require pressing F2.
+
+All old debug controls were removed from the runtime keyboard path: F5-F12, mock tracking, arrow-key camera control, manual tracking disable, AER eye swap and x15 diagnostics are no longer user keybinds.
+
+## GUI behavior
+
+During normal gameplay:
+
+```text
+FH2 world -> full VR scene
+```
+
+When FH2VR detects Pause Menu, Photo Mode, World Map, Horizon Hub, Garage or Loading:
+
+```text
+last gameplay frame -> VR background
+current FH2 frame   -> flat 16:9 menu overlay
+```
+
+**F2** can force the flat overlay manually, which is useful for showing the live HUD/minimap on a virtual 16:9 screen while the VR scene remains behind it.
+
+The overlay currently receives FH2's final composite backbuffer rather than a dedicated UI-only render target. Isolating the real HUD/frontend target is a later renderer step.
 
 ## Renderer pipeline
 
@@ -87,62 +53,45 @@ For current M4/M4.1 testing, use **F9 only** unless specifically testing one of 
 FH2 D3D12 backbuffer (R10G10B10A2)
         |
         v
-Present / captured DIRECT queue
+captured DIRECT queue / Present
         |
         v
 retained D3D12 source texture
         |
         v
-compute conversion
+GPU compute conversion
 R10G10B10A2 -> R8G8B8A8
         |
         v
-OpenVR DirectX12 submit
+projection + FOV match
         |
-        +---- left eye bounds from GetProjectionRaw
-        |
-        +---- right eye bounds from GetProjectionRaw
+        v
+OpenVR DirectX12 Submit_TextureWithPose
         |
         v
 SteamVR / Quest 3
 ```
 
-## Testing M4.1
-
-1. Install the latest `FH2VR-0.4.0-dev` artifact.
-2. Start FH2 and enter Driver/cockpit view.
-3. Press **F9** only.
-4. Check whether the cross-eye effect is smaller, unchanged or worse.
-5. Leave it running for a few seconds so at least one `Driver FOV diagnostic` line is recorded.
-6. Exit and inspect `FH2VR_RendererProbe.log`.
-
-Useful lines are the M4 projection log and the Driver FOV diagnostic. Together they show the HMD-required frustum and the game's current camera FOV.
-
-Keep projection tests brief if the image causes eye strain, headache, nausea or dizziness.
-
 ## Requirements
 
 - Windows x64
-- Azimuth supported by FH2ML
-- FH2ML Host API v1
+- supported Azimuth + FH2ML
 - Forza Horizon 2 build 1.0.0.64
 - SteamVR/OpenVR
-- a D3D12-capable GPU
-- a tracked HMD for real VR testing
+- D3D12-capable GPU
+- tracked HMD
 
 Current live target: **Meta Quest 3 over wired Quest Link**.
 
 ## Install
 
-Download the latest GitHub Actions artifact named:
+Download the latest GitHub Actions artifact:
 
 ```text
 FH2VR-0.4.0-dev
 ```
 
-The branch, manifest, CMake project and CI artifact now all use the same 0.4.0 development version so test builds are no longer mixed with the old `0.3.2-dev` label.
-
-Install the artifact as a normal FH2ML mod. Avoid keeping multiple copies of the mod with the same `fh2vr` ID installed at once.
+Install it as a normal FH2ML mod. Do not keep multiple installed copies with the same `fh2vr` mod ID.
 
 ## Build
 
@@ -152,19 +101,17 @@ cmake --build build --config Release --parallel
 cmake --install build --config Release --prefix package --component FH2VR
 ```
 
-CMake fetches:
+Dependencies fetched by CMake:
 
 - Valve OpenVR SDK `v2.15.6`
 - MinHook `v1.3.4`
 
-The package also carries their upstream license files under `licenses/`.
+Their upstream license files are packaged under `licenses/`.
 
-## Roadmap
+## Next renderer work
 
-1. Live-test M4 per-eye OpenVR bounds and compare the result with the old symmetric submission.
-2. Compare Quest combined FOV against the logged Driver mounted-camera FOV.
-3. If projection improves but scale remains wrong, match FH2 Driver FOV to the HMD combined frustum.
-4. Add a D3D12 depth-resource probe (`CreateDepthStencilView` / depth-capable resources) and identify the real scene depth target.
-5. Use color + depth for per-eye reprojection if a stable depth source is available.
-6. Separate scene from HUD/UI if necessary.
-7. Add positional 6DoF and renderer-level improvements after the projection/depth path is stable.
+1. Continue hardening automatic GUI transitions and frozen-world behavior.
+2. Find the FH2 HUD/frontend render target so the flat overlay can contain UI only.
+3. Probe the D3D12 scene depth target.
+4. Investigate color + depth per-eye reprojection / true stereo synthesis.
+5. Add positional 6DoF after the stereo/depth path is stable.
