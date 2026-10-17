@@ -32,13 +32,13 @@ FetchContent_MakeAvailable(minhook)
 add_library(FH2VR SHARED
   src/FH2VR.cpp
   src/HeadsetPreview.cpp
-  src/RendererM2.cpp
+  src/RendererM3.cpp
   src/CameraProbeFixed.cpp
 )
 target_include_directories(FH2VR PRIVATE include)
 target_compile_definitions(FH2VR PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX OPENVR_BUILD_STATIC)
 target_compile_options(FH2VR PRIVATE /W4 /WX /EHsc /utf-8)
-target_link_libraries(FH2VR PRIVATE openvr_api64 minhook user32 gdi32 d3d11 d3d12 dxgi)
+target_link_libraries(FH2VR PRIVATE openvr_api64 minhook user32 gdi32 d3d11 d3d12 d3dcompiler dxgi)
 set_target_properties(FH2VR PROPERTIES OUTPUT_NAME FH2VR)
 
 install(TARGETS FH2VR RUNTIME DESTINATION . COMPONENT FH2VR)
