@@ -1,6 +1,11 @@
 # FH2VR
 
-Experimental VR mod for **Forza Horizon 2 Xbox One 1.0.0.64 running through Azimuth/FH2ML**.
+Experimental VR mod for **Forza Horizon 2 Xbox One 1.0.0.64 running through Azimuth**.
+
+FH2VR can currently be used in two ways:
+
+- **Standalone** — `FH2VR.exe` attaches the FH2VR runtime to the running `azimuth.exe`; no FH2ML installation is required and no Azimuth helper files are replaced.
+- **FH2ML** — `FH2VR.dll` can still be installed as a normal FH2ML mod.
 
 ## Current status: 0.4.0-dev
 
@@ -75,17 +80,43 @@ SteamVR / Quest 3
 ## Requirements
 
 - Windows x64
-- supported Azimuth + FH2ML
+- Azimuth
 - Forza Horizon 2 build 1.0.0.64
 - SteamVR/OpenVR
 - D3D12-capable GPU
 - tracked HMD
 
+FH2ML is required only for the FH2ML package, not for the standalone package.
+
 Current live target: **Meta Quest 3 over wired Quest Link**.
 
-## Install
+## Install — standalone
 
-Download the latest GitHub Actions artifact:
+Download the GitHub Actions artifact:
+
+```text
+FH2VR-Standalone-0.4.0-dev
+```
+
+Keep the package layout intact:
+
+```text
+FH2VR.exe
+Payload/
+  FH2VR.dll
+```
+
+Run `FH2VR.exe`. It waits for `azimuth.exe` and automatically attaches the runtime when Azimuth starts. You can also use **Attach now** from the tray menu.
+
+If you want the launcher to start Azimuth for you, use **Select Azimuth folder...** once and then **Launch Azimuth**.
+
+The standalone path does **not** replace `azimuth-tls.dll`, install a helper, create a `mods` entry, or require FH2ML.
+
+Once FH2 is ready, press **F1** to enable VR. **F2** manually toggles the flat HUD/GUI overlay.
+
+## Install — FH2ML
+
+Download the GitHub Actions artifact:
 
 ```text
 FH2VR-0.4.0-dev
@@ -95,10 +126,18 @@ Install it as a normal FH2ML mod. Do not keep multiple installed copies with the
 
 ## Build
 
+Native runtime / FH2ML package:
+
 ```powershell
 cmake -S . -B build -A x64
 cmake --build build --config Release --parallel
 cmake --install build --config Release --prefix package --component FH2VR
+```
+
+Standalone launcher:
+
+```powershell
+dotnet publish standalone/FH2VR.Standalone.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true
 ```
 
 Dependencies fetched by CMake:
