@@ -31,6 +31,7 @@ FetchContent_MakeAvailable(minhook)
 
 add_library(FH2VR SHARED
   src/FH2VR.cpp
+  src/StandaloneEntry.cpp
   src/HeadsetPreview.cpp
   src/RendererM9.cpp
   src/FovMatch.cpp
