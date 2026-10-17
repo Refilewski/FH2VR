@@ -24,6 +24,10 @@ constexpr uintptr_t kCameraViewDirtyOffset = 0x21A;
 constexpr float kPi = 3.14159265358979323846f;
 constexpr float kPitchLimit = 1.39626340159546366154f; // 80 degrees
 constexpr ULONGLONG kVrRetryMs = 2000;
+constexpr ULONGLONG kVrReconnectRetryMs = 350;
+constexpr ULONGLONG kCompositorFailureReconnectMs = 1200;
+constexpr ULONGLONG kHmdInvalidReconnectMs = 1500;
+constexpr ULONGLONG kPreviewFailureReconnectMs = 1500;
 
 using CameraUpdate = void (*)(void *camera, float dt, unsigned char reset);
 
@@ -76,6 +80,14 @@ bool write_memory(void *address, const void *data, size_t size) {
     DWORD ignored = 0;
     const BOOL restored = VirtualProtect(address, size, oldProtection, &ignored);
     return restored != FALSE;
+}
+
+bool preview_error_is_openvr_loss(const std::string &error) {
+    return error.find("OpenVR") != std::string::npos ||
+           error.find("Submit(") != std::string::npos ||
+           error.find("GetLastPoseForTrackedDeviceIndex") != std::string::npos ||
+           error.find("VRCompositor") != std::string::npos ||
+           error.find("overlay interface") != std::string::npos;
 }
 
 void apply_head_look(float forward[4], float yaw, float pitch) {
@@ -179,6 +191,9 @@ DWORD WINAPI tracking_thread(void *) {
     vr::IVRSystem *system = nullptr;
     vr::IVRCompositor *compositor = nullptr;
     ULONGLONG nextVrRetryAt = 0;
+    ULONGLONG waitFailureSince = 0;
+    ULONGLONG hmdInvalidSince = 0;
+    ULONGLONG previewFailureSince = 0;
     float referenceYaw = 0.0f;
     float referencePitch = 0.0f;
     bool hasReference = false;
@@ -192,6 +207,20 @@ DWORD WINAPI tracking_thread(void *) {
         }
     };
 
+    auto reconnect_runtime = [&](const std::string &reason, ULONGLONG now) {
+        log_message(reason);
+        g_poseValid.store(false, std::memory_order_release);
+        hasReference = false;
+        g_recenterRequested.store(true, std::memory_order_relaxed);
+        shutdown_runtime();
+        nextVrRetryAt = now + kVrReconnectRetryMs;
+        waitFailureSince = 0;
+        hmdInvalidSince = 0;
+        previewFailureSince = 0;
+        lastCompositorError.clear();
+        lastPreviewError.clear();
+    };
+
     while (!g_stop.load(std::memory_order_relaxed)) {
         const ULONGLONG now = GetTickCount64();
 
@@ -203,6 +232,9 @@ DWORD WINAPI tracking_thread(void *) {
             hasReference = false;
             g_recenterRequested.store(true, std::memory_order_relaxed);
             nextVrRetryAt = 0;
+            waitFailureSince = 0;
+            hmdInvalidSince = 0;
+            previewFailureSince = 0;
             lastInitError.clear();
             lastPreviewError.clear();
             lastCompositorError.clear();
@@ -239,9 +271,14 @@ DWORD WINAPI tracking_thread(void *) {
                         log_message(
                             "OpenVR scene initialized but VRCompositor is unavailable; retrying");
                         shutdown_runtime();
-                        nextVrRetryAt = now + kVrRetryMs;
+                        nextVrRetryAt = now + kVrReconnectRetryMs;
                     } else {
                         lastInitError.clear();
+                        lastPreviewError.clear();
+                        lastCompositorError.clear();
+                        waitFailureSince = 0;
+                        hmdInvalidSince = 0;
+                        previewFailureSince = 0;
                         hasReference = false;
                         g_recenterRequested.store(true, std::memory_order_relaxed);
                         log_message(
@@ -268,23 +305,53 @@ DWORD WINAPI tracking_thread(void *) {
                 log_message(error);
                 lastCompositorError = error;
             }
+            if (waitFailureSince == 0) {
+                waitFailureSince = now;
+            }
             g_poseValid.store(false, std::memory_order_release);
             hasReference = false;
             g_recenterRequested.store(true, std::memory_order_relaxed);
+
+            if (now - waitFailureSince >= kCompositorFailureReconnectMs) {
+                reconnect_runtime(
+                    "SteamVR compositor stopped responding; reconnecting OpenVR automatically",
+                    now);
+                Sleep(10);
+                continue;
+            }
+
             Sleep(1);
             continue;
         }
+        waitFailureSince = 0;
         lastCompositorError.clear();
 
         const vr::TrackedDevicePose_t &hmd =
             poses[vr::k_unTrackedDeviceIndex_Hmd];
         if (hmd.bDeviceIsConnected && hmd.bPoseIsValid) {
+            hmdInvalidSince = 0;
             publish_pose(hmd.mDeviceToAbsoluteTracking,
                          referenceYaw, referencePitch, hasReference);
         } else {
             g_poseValid.store(false, std::memory_order_release);
             hasReference = false;
             g_recenterRequested.store(true, std::memory_order_relaxed);
+            if (hmdInvalidSince == 0) {
+                hmdInvalidSince = now;
+            }
+
+            if (now - hmdInvalidSince >= kHmdInvalidReconnectMs) {
+                reconnect_runtime(
+                    "HMD disconnected or tracking unavailable; reconnecting OpenVR automatically",
+                    now);
+                Sleep(10);
+                continue;
+            }
+
+            // Do not keep submitting stale scene poses while the headset is
+            // briefly disconnected/asleep.
+            Sleep(4);
+            continue;
         }
 
         std::string previewError;
@@ -294,9 +361,27 @@ DWORD WINAPI tracking_thread(void *) {
                 log_message("Headset preview: " + previewError);
                 lastPreviewError = previewError;
             }
-        } else if (!lastPreviewError.empty()) {
-            log_message("Headset preview recovered");
-            lastPreviewError.clear();
+
+            if (preview_error_is_openvr_loss(previewError)) {
+                if (previewFailureSince == 0) {
+                    previewFailureSince = now;
+                }
+                if (now - previewFailureSince >= kPreviewFailureReconnectMs) {
+                    reconnect_runtime(
+                        "OpenVR preview submission remained unavailable; reconnecting automatically",
+                        now);
+                    Sleep(10);
+                    continue;
+                }
+            } else {
+                previewFailureSince = 0;
+            }
+        } else {
+            previewFailureSince = 0;
+            if (!lastPreviewError.empty()) {
+                log_message("Headset preview recovered");
+                lastPreviewError.clear();
+            }
         }
     }
 
