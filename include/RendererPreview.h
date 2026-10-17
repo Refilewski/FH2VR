@@ -5,9 +5,9 @@
 
 #include <string>
 
-// M9 still uses the historical VK_F5 token internally. Remap that token at
-// compile time so the only public/manual GUI key is F2. F5 no longer triggers
-// FH2VR. This can disappear once M9 is folded into the next renderer cleanup.
+// The active M9 renderer historically used VK_F5 for its manual GUI toggle.
+// Public controls are now intentionally limited to F1/F2, so remap that token
+// to F2 at compile time. Physical F5 no longer triggers FH2VR.
 #ifdef VK_F5
 #undef VK_F5
 #endif
