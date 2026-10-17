@@ -6,6 +6,9 @@
 
 namespace {
 
+constexpr float kParallaxVirtualPlaneMetersM10 = 0.55f;
+constexpr float kParallaxOverscanScaleM10 = 0.76f;
+
 struct ParallaxStateM10 {
     bool haveReference = false;
     vr::HmdMatrix34_t referencePose{};
@@ -15,27 +18,44 @@ struct ParallaxStateM10 {
 
 ParallaxStateM10 g_parallaxM10{};
 
-void clamp_bounds_axis_m10(float &minimum, float &maximum) {
-    const float span = maximum - minimum;
-    if (!(span > 0.0f) || !std::isfinite(span)) {
-        return;
+float soft_limit_shift_m10(float value, float negativeRoom, float positiveRoom) {
+    negativeRoom = std::max(negativeRoom, 0.0f);
+    positiveRoom = std::max(positiveRoom, 0.0f);
+
+    if (value > 0.0f) {
+        if (positiveRoom <= 0.00001f) return 0.0f;
+        return positiveRoom * std::tanh(value / positiveRoom);
     }
-    if (span >= 1.0f) {
-        minimum = 0.0f;
-        maximum = 1.0f;
-        return;
+    if (value < 0.0f) {
+        if (negativeRoom <= 0.00001f) return 0.0f;
+        return -negativeRoom * std::tanh((-value) / negativeRoom);
     }
-    if (minimum < 0.0f) {
-        maximum -= minimum;
-        minimum = 0.0f;
+    return 0.0f;
+}
+
+void scaled_axis_m10(float minimum, float maximum, float scale,
+                     float &scaledMinimum, float &scaledMaximum) {
+    scaledMinimum = 0.5f + (minimum - 0.5f) * scale;
+    scaledMaximum = 0.5f + (maximum - 0.5f) * scale;
+}
+
+void common_shift_room_m10(const vr::VRTextureBounds_t &left,
+                           const vr::VRTextureBounds_t &right,
+                           float scale,
+                           bool vertical,
+                           float &negativeRoom,
+                           float &positiveRoom) {
+    float lMin = 0.0f, lMax = 0.0f, rMin = 0.0f, rMax = 0.0f;
+    if (vertical) {
+        scaled_axis_m10(left.vMin, left.vMax, scale, lMin, lMax);
+        scaled_axis_m10(right.vMin, right.vMax, scale, rMin, rMax);
+    } else {
+        scaled_axis_m10(left.uMin, left.uMax, scale, lMin, lMax);
+        scaled_axis_m10(right.uMin, right.uMax, scale, rMin, rMax);
     }
-    if (maximum > 1.0f) {
-        const float excess = maximum - 1.0f;
-        minimum -= excess;
-        maximum = 1.0f;
-    }
-    minimum = std::clamp(minimum, 0.0f, 1.0f);
-    maximum = std::clamp(maximum, 0.0f, 1.0f);
+
+    negativeRoom = std::max(0.0f, std::min(lMin, rMin));
+    positiveRoom = std::max(0.0f, std::min(1.0f - lMax, 1.0f - rMax));
 }
 
 void transform_bounds_m10(vr::VRTextureBounds_t &bounds,
@@ -46,17 +66,21 @@ void transform_bounds_m10(vr::VRTextureBounds_t &bounds,
     bounds.uMax = 0.5f + (bounds.uMax - 0.5f) * scale + uShift;
     bounds.vMin = 0.5f + (bounds.vMin - 0.5f) * scale + vShift;
     bounds.vMax = 0.5f + (bounds.vMax - 0.5f) * scale + vShift;
-    clamp_bounds_axis_m10(bounds.uMin, bounds.uMax);
-    clamp_bounds_axis_m10(bounds.vMin, bounds.vMax);
+
+    // Safety only. Normal M10 movement is kept inside the valid texture by
+    // soft_limit_shift_m10(), so these clamps should not create a hard stop.
+    bounds.uMin = std::clamp(bounds.uMin, 0.0f, 1.0f);
+    bounds.uMax = std::clamp(bounds.uMax, 0.0f, 1.0f);
+    bounds.vMin = std::clamp(bounds.vMin, 0.0f, 1.0f);
+    bounds.vMax = std::clamp(bounds.vMax, 0.0f, 1.0f);
 }
 
 void apply_head_position_parallax_m10(ProjectionM9 &projection,
                                       const vr::HmdMatrix34_t &pose) {
     constexpr ULONGLONG kReferenceResetGapMs = 750;
-    constexpr float kVirtualPlaneMeters = 1.60f;
-    constexpr float kMaxHorizontalMeters = 0.18f;
-    constexpr float kMaxVerticalMeters = 0.18f;
-    constexpr float kMaxDepthMeters = 0.20f;
+    constexpr float kMaxHorizontalMeters = 0.24f;
+    constexpr float kMaxVerticalMeters = 0.22f;
+    constexpr float kMaxDepthMeters = 0.24f;
 
     const ULONGLONG now = GetTickCount64();
     if (!g_parallaxM10.haveReference ||
@@ -89,19 +113,45 @@ void apply_head_position_parallax_m10(ProjectionM9 &projection,
         return;
     }
 
-    const float uShift =
-        localX / (2.0f * kVirtualPlaneMeters * projection.sourceTanHalfX);
-    const float vShift =
-        -localY / (2.0f * kVirtualPlaneMeters * projection.sourceTanHalfY);
-    const float scale = std::clamp(
-        1.0f - localForward / kVirtualPlaneMeters, 0.84f, 1.16f);
+    // X is intentionally inverted relative to the previous M10 build. The
+    // FH2 camera yaw was already correct; only the screen-space parallax axis
+    // had the wrong sign. Y keeps the proven direction.
+    const float rawUShift =
+        -localX / (2.0f * kParallaxVirtualPlaneMetersM10 * projection.sourceTanHalfX);
+    const float rawVShift =
+        -localY / (2.0f * kParallaxVirtualPlaneMetersM10 * projection.sourceTanHalfY);
+
+    // Keep a permanent overscan reserve so sideways/up/down movement has real
+    // source pixels available instead of immediately colliding with 0..1 UV.
+    // Forward/back movement changes the crop inside that reserve.
+    const float depthScale = std::clamp(
+        1.0f - localForward / kParallaxVirtualPlaneMetersM10,
+        0.72f, 1.18f);
+    const float scale = kParallaxOverscanScaleM10 * depthScale;
+
+    float uNegativeRoom = 0.0f, uPositiveRoom = 0.0f;
+    float vNegativeRoom = 0.0f, vPositiveRoom = 0.0f;
+    common_shift_room_m10(projection.left, projection.right, scale, false,
+                          uNegativeRoom, uPositiveRoom);
+    common_shift_room_m10(projection.left, projection.right, scale, true,
+                          vNegativeRoom, vPositiveRoom);
+
+    const float uShift = soft_limit_shift_m10(
+        rawUShift, uNegativeRoom, uPositiveRoom);
+    const float vShift = soft_limit_shift_m10(
+        rawVShift, vNegativeRoom, vPositiveRoom);
 
     transform_bounds_m10(projection.left, uShift, vShift, scale);
     transform_bounds_m10(projection.right, uShift, vShift, scale);
 
     if (!g_parallaxM10.logged) {
         g_parallaxM10.logged = true;
-        log_line("M10 positional parallax active: HMD X/Y/Z -> source-frustum shift/scale, 1.60m virtual plane");
+        char buffer[384]{};
+        std::snprintf(buffer, sizeof(buffer),
+                      "M10.2 positional parallax active: corrected X sign, %.2fm virtual plane, %.0f%% overscan, soft UV limits",
+                      kParallaxVirtualPlaneMetersM10,
+                      (1.0f - kParallaxOverscanScaleM10) * 100.0f);
+        log_line(buffer);
     }
 }
 
@@ -117,9 +167,17 @@ bool submit_scene_m10(vr::IVRCompositor *compositor,
         return false;
     }
 
+    // We intentionally render FH2 wider than the headset target. M10.2 then
+    // crops that overscan back down while moving the crop window for parallax,
+    // preserving roughly the same perceived FOV at the neutral head position.
+    const float overscanTanHalfX = projection.sourceTanHalfX / kParallaxOverscanScaleM10;
+    const float overscanTanHalfY = projection.sourceTanHalfY / kParallaxOverscanScaleM10;
+    const float overscanHorizontalFov = 2.0f * std::atan(overscanTanHalfX);
+    const float overscanVerticalFov = 2.0f * std::atan(overscanTanHalfY);
+
     update_fov_match_target(
-        projection.sourceVerticalFovRadians,
-        projection.sourceHorizontalFovRadians,
+        overscanVerticalFov,
+        overscanHorizontalFov,
         projection.sourceAspect,
         projection.combinedVerticalFovRadians,
         projection.combinedHorizontalFovRadians);
@@ -135,11 +193,8 @@ bool submit_scene_m10(vr::IVRCompositor *compositor,
     const vr::HmdMatrix34_t cameraMatchedPose =
         roll_neutral_pose_m9(stableTrackedPose, &removedRollDegrees);
 
-    // Use the real HMD translation only to derive our controlled M10
-    // parallax. A mono FH2 frame has no scene depth, so passing that same
-    // translation to OpenVR's TextureWithPose causes the compositor to apply
-    // a second, depthless translational reprojection (the subtle curved/U
-    // motion seen when moving the head sideways).
+    // Real HMD translation drives only our controlled parallax. The OpenVR
+    // compositor receives orientation only, preventing a second translation.
     apply_head_position_parallax_m10(projection, cameraMatchedPose);
 
     vr::HmdMatrix34_t compositorPose = cameraMatchedPose;
@@ -176,7 +231,7 @@ bool submit_scene_m10(vr::IVRCompositor *compositor,
     if (!loggedSuccess.exchange(true, std::memory_order_acq_rel)) {
         char buffer[448]{};
         std::snprintf(buffer, sizeof(buffer),
-                      "M10 VR scene submit OK: roll-neutral orientation-only compositor pose + positional parallax, first removed roll=%.2f deg",
+                      "M10.2 VR scene submit OK: orientation-only compositor pose + stronger positional parallax, first removed roll=%.2f deg",
                       removedRollDegrees);
         log_line(buffer);
     }
