@@ -35,6 +35,7 @@ add_library(FH2VR SHARED
   src/RendererM8.cpp
   src/FovMatch.cpp
   src/UiModeDetector.cpp
+  src/GameBaseLocator.cpp
 )
 target_include_directories(FH2VR PRIVATE include)
 target_compile_definitions(FH2VR PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX OPENVR_BUILD_STATIC)
