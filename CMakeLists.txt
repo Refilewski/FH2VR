@@ -43,3 +43,11 @@ set_target_properties(FH2VR PROPERTIES OUTPUT_NAME FH2VR)
 
 install(TARGETS FH2VR RUNTIME DESTINATION . COMPONENT FH2VR)
 install(FILES mod.json README.md THIRD_PARTY.md DESTINATION . COMPONENT FH2VR)
+install(FILES "${openvr_SOURCE_DIR}/LICENSE"
+        DESTINATION licenses
+        RENAME OpenVR-LICENSE.txt
+        COMPONENT FH2VR)
+install(FILES "${minhook_SOURCE_DIR}/LICENSE.txt"
+        DESTINATION licenses
+        RENAME MinHook-LICENSE.txt
+        COMPONENT FH2VR)
