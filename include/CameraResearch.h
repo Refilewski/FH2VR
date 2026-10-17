@@ -1,12 +1,12 @@
 #pragma once
 
 #include <cstdint>
+#include <cstring>
 
 namespace fh2vr {
 
-// M11 research-only instrumentation. The camera hook reports the live Driver
-// camera pointer here; a separate worker snapshots it so no file I/O happens
-// on the game's camera-update thread.
+// M11 research-only instrumentation. A caller may report a live camera pointer
+// here; the logger itself also resolves the camera through the known FH2 chain.
 void camera_research_observe(void *camera);
 
 // Starts a short, read-only camera/matrix capture. No VR runtime is required.
