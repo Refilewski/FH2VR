@@ -2,10 +2,17 @@ name: Build FH2VR
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      - feature/present-probe-0.4.0-dev
+    tags:
+      - 'v*'
   pull_request:
     branches: [main]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -13,28 +20,37 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Configure
+      - name: Configure native runtime
         run: cmake -S . -B build -A x64
 
-      - name: Build
+      - name: Build native runtime
         run: cmake --build build --config Release --parallel
 
       - name: Verify manifest version
         shell: pwsh
         run: |
           $manifest = Get-Content mod.json -Raw | ConvertFrom-Json
-          if ($manifest.version -ne '0.3.2-dev') { throw "Unexpected mod version: $($manifest.version)" }
+          if ($manifest.version -ne '0.4.0-dev') { throw "Unexpected mod version: $($manifest.version)" }
           if ($manifest.entry -ne 'FH2VR.dll') { throw "Unexpected entry: $($manifest.entry)" }
           if (-not (Test-Path 'build/Release/FH2VR.dll')) { throw 'FH2VR.dll was not produced' }
 
-      - name: Install package
+      - name: Install FH2ML package
         run: cmake --install build --config Release --prefix package --component FH2VR
 
-      - name: Verify clean package
+      - name: Verify FH2ML package
         shell: pwsh
         run: |
-          $expected = @('FH2VR.dll', 'mod.json', 'README.md', 'THIRD_PARTY.md') | Sort-Object
+          $expected = @(
+            'FH2VR.dll',
+            'mod.json',
+            'README.md',
+            'THIRD_PARTY.md',
+            'OpenVR-LICENSE.txt',
+            'MinHook-LICENSE.txt'
+          ) | Sort-Object
           $actual = Get-ChildItem package -File -Recurse | ForEach-Object { $_.Name } | Sort-Object
           if ($actual.Count -ne $expected.Count) {
             throw "Unexpected package file count: $($actual.Count). Actual: $($actual -join ', ')"
@@ -43,9 +59,151 @@ jobs:
             throw "Unexpected package contents. Actual: $($actual -join ', ')"
           }
 
+      - name: Stage standalone resource
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path 'standalone/Embedded' | Out-Null
+          Copy-Item 'build/Release/FH2VR.dll' 'standalone/Embedded/FH2VR.dll' -Force
+
+      - name: Publish standalone app
+        shell: pwsh
+        run: |
+          dotnet publish standalone/FH2VR.Standalone.csproj `
+            -c Release `
+            -r win-x64 `
+            --self-contained true `
+            -p:PublishSingleFile=true `
+            -o standalone-publish
+
+          if (-not (Test-Path 'standalone-publish/FH2VR.exe')) {
+            throw 'Standalone FH2VR.exe was not produced'
+          }
+
+      - name: Package standalone build
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path 'standalone-package/licenses' | Out-Null
+          Copy-Item 'standalone-publish/FH2VR.exe' 'standalone-package/FH2VR.exe'
+          Copy-Item 'README.md' 'standalone-package/README.md'
+          Copy-Item 'THIRD_PARTY.md' 'standalone-package/THIRD_PARTY.md'
+          Copy-Item 'package/licenses/OpenVR-LICENSE.txt' 'standalone-package/licenses/OpenVR-LICENSE.txt'
+          Copy-Item 'package/licenses/MinHook-LICENSE.txt' 'standalone-package/licenses/MinHook-LICENSE.txt'
+
+      - name: Verify standalone package
+        shell: pwsh
+        run: |
+          $expected = @(
+            'FH2VR.exe',
+            'README.md',
+            'THIRD_PARTY.md',
+            'licenses/OpenVR-LICENSE.txt',
+            'licenses/MinHook-LICENSE.txt'
+          ) | Sort-Object
+          $root = (Resolve-Path 'standalone-package').Path
+          $actual = Get-ChildItem 'standalone-package' -File -Recurse | ForEach-Object {
+            $_.FullName.Substring($root.Length + 1).Replace('\','/')
+          } | Sort-Object
+          if ($actual.Count -ne $expected.Count) {
+            throw "Unexpected standalone package file count: $($actual.Count). Actual: $($actual -join ', ')"
+          }
+          if (Compare-Object $expected $actual) {
+            throw "Unexpected standalone package contents. Actual: $($actual -join ', ')"
+          }
+
       - name: Upload FH2ML package
         uses: actions/upload-artifact@v4
         with:
-          name: FH2VR-0.3.2-dev
+          name: FH2VR-0.4.0-dev
           path: package/
           if-no-files-found: error
+
+      - name: Upload standalone package
+        uses: actions/upload-artifact@v4
+        with:
+          name: FH2VR-Standalone-0.4.0-dev
+          path: standalone-package/
+          if-no-files-found: error
+
+      - name: Create release ZIPs
+        if: github.event_name == 'push'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path 'release-assets' | Out-Null
+
+          if ($env:GITHUB_REF -like 'refs/tags/*') {
+            $label = $env:GITHUB_REF_NAME
+          } else {
+            $label = 'dev-latest'
+          }
+
+          Compress-Archive -Path 'standalone-package/*' `
+            -DestinationPath "release-assets/FH2VR-Standalone-$label.zip" -Force
+          Compress-Archive -Path 'package/*' `
+            -DestinationPath "release-assets/FH2VR-FH2ML-$label.zip" -Force
+
+          Get-FileHash release-assets/*.zip -Algorithm SHA256 | Format-Table
+
+      - name: Publish dev-latest prerelease
+        if: github.event_name == 'push' && github.ref == 'refs/heads/feature/present-probe-0.4.0-dev'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f dev-latest $env:GITHUB_SHA
+          git push origin refs/tags/dev-latest --force
+
+          $body = @"
+          Automated development build from commit ``$($env:GITHUB_SHA.Substring(0, 7))``.
+
+          **Standalone**
+          - single ``FH2VR.exe`` with embedded native runtime
+          - automatic Azimuth detection/attach
+          - F1: VR toggle / recenter
+          - F2: GUI/HUD overlay
+
+          **Current development renderer**
+          - M10.2 positional parallax
+          - corrected left/right parallax direction
+          - stronger parallax with overscan and soft saturation
+          - automatic SteamVR/OpenVR reconnect after headset disconnects
+
+          This is an experimental prerelease for testing.
+          "@
+
+          gh release view dev-latest *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release edit dev-latest `
+              --title "FH2VR Development Build" `
+              --notes $body `
+              --prerelease
+          } else {
+            gh release create dev-latest `
+              --title "FH2VR Development Build" `
+              --notes $body `
+              --prerelease
+          }
+
+          gh release upload dev-latest release-assets/*.zip --clobber
+
+      - name: Publish tagged release
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $isPrerelease = $tag -match '(?i)(dev|alpha|beta|rc)'
+
+          $args = @(
+            'release', 'create', $tag,
+            'release-assets/*',
+            '--title', "FH2VR $tag",
+            '--generate-notes'
+          )
+          if ($isPrerelease) {
+            $args += '--prerelease'
+          }
+
+          & gh @args

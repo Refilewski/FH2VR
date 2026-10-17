@@ -1,118 +1,141 @@
 # FH2VR
 
-Experimental VR/head-tracking mod for **Forza Horizon 2 Xbox One 1.0.0.64 on Azimuth**, built as a native FH2ML mod.
+Experimental VR mod for **Forza Horizon 2 Xbox One 1.0.0.64 running through Azimuth**.
 
-## Current status: 0.3.2-dev diagnostic prototype
+FH2VR can be used in two ways:
 
-This is still experimental. The current build proves several VR paths:
+- **Standalone** — a single `FH2VR.exe` watches for `azimuth.exe`, extracts its embedded native runtime to `%LOCALAPPDATA%\FH2VR\runtime\<sha256>\FH2VR.dll`, and attaches automatically. FH2ML is not required and Azimuth helper files are not replaced.
+- **FH2ML** — `FH2VR.dll` can still be installed as a normal FH2ML mod.
 
-- reads live HMD orientation from SteamVR through OpenVR;
-- hooks the FH2 **Driver / cockpit** camera through FH2ML and applies head yaw/pitch;
-- can run without a headset through a keyboard mock head-tracking mode;
-- has a temporary GDI -> D3D11 -> OpenVR headset preview path;
-- includes an experimental **alternate-eye rendering (AER) probe** that alternates a real OpenVR eye offset against FH2's cached camera matrix and retains separate left/right preview textures;
-- adds diagnostics to determine whether `camera+0x260` actually affects the rendered world before more work is spent on GDI synchronization.
+## Current status: 0.4.0-dev
 
-The AER probe is not yet final VR: projection asymmetry, frame/eye synchronization and direct renderer capture still need work.
+Confirmed live on Quest 3 / SteamVR / wired Meta Link:
+
+- native FH2 D3D12 backbuffer capture;
+- GPU conversion from `R10G10B10A2_UNORM` to OpenVR-friendly `R8G8B8A8_UNORM`;
+- per-eye OpenVR projection bounds from `GetProjectionRaw()`;
+- FH2 Driver-camera FOV matched to the Quest frustum;
+- yaw/pitch head tracking in the FH2 camera;
+- roll-neutral compositor pose so the world does not tilt with your head;
+- stable-frame pose reprojection;
+- automatic flat GUI/menu overlay using FH2 UI-state detection ported from Azimuth-RPC;
+- resilient overlay recreation after OpenVR restarts;
+- frozen gameplay frame behind automatically detected menus to avoid the old menu-on-menu duplication;
+- standalone attach path without replacing `azimuth-tls.dll`.
+
+### M10 — positional parallax
+
+The current development renderer adds an experimental positional-head-movement layer. Headset X/Y/Z translation relative to the initial VR pose shifts and slightly scales the source frustum, so leaning left/right/up/down/forward/back produces a positional parallax response instead of rotation-only tracking.
+
+This is deliberately conservative and does **not** pretend to be true depth-based stereo. FH2 is still rendered as one mono scene; M10 approximates positional 6DoF until a real scene-depth/stereo path exists.
 
 ## Controls
 
-- **F6** — toggle keyboard mock head tracking.
-- **Left / Right Arrow** — mock yaw.
-- **Up / Down Arrow** — mock pitch.
-- **F7** — toggle head tracking globally.
-- **F8** — recenter.
-- **F9** — toggle headset preview.
-- **F10** — toggle experimental AER. Enabling it also enables the headset preview and resets eye swapping/debug amplification.
-- **F11** — swap the actual left/right textures submitted to the OpenVR compositor.
-- **F12** — toggle the diagnostic **x15 eye-translation multiplier**. This intentionally exaggerates the camera offset so a renderer-facing matrix should move the view very obviously.
+FH2VR intentionally exposes only two keys:
 
-The first valid SteamVR pose is automatically used as the initial center.
+- **F1** — VR ON/OFF. Enabling VR also enables head tracking and automatically recenters the current head pose.
+- **F2** — manual HUD/GUI flat overlay ON/OFF. Automatic menu/map/garage/loading detection works independently.
 
-## 0.3.2-dev AER diagnostic
+The old F5-F12/debug controls, mock tracking, arrow-key camera controls, manual tracking disable and AER diagnostics are gone from the user keyboard path.
 
-The probe uses `IVRSystem::GetEyeToHeadTransform` for the runtime-provided left/right eye offsets instead of hard-coding IPD.
+## GUI behavior
 
-For the FH2 camera side it follows the camera chain confirmed by Extra Options:
+Normal gameplay:
 
 ```text
-GAME_RVA_PLAYER_MANAGER (0x34ABA60)
- -> game + 0x48
- -> simulation + 0x98
- -> manager + 0x2D0
- -> views -> active view
- -> view + 0xC0
- -> cached camera
- -> camera + 0x260 (4x4 matrix)
+FH2 world -> full VR scene
 ```
 
-Extra Options identifies `[2,6,10]` as the third matrix column/look direction. The current hypothesis is a DirectX-style row-vector view matrix with translation in `[12,13,14]`, so the lateral eye probe writes `matrix[12] = base - eyeX`.
-
-### Anti-drift handling
-
-0.3.2 no longer blindly subtracts the next eye offset from whatever FH2VR wrote previously. It tracks the last unmodified base and last written translation. If FH2 has not rebuilt the matrix between eye updates, the next eye is derived from the same base rather than accumulating offsets. If FH2 has changed the matrix, the new value becomes the fresh base.
-
-### Matrix dump and x15 perturbation
-
-Enabling AER requests a one-time dump of all 16 floats before the eye offset is applied. Pressing **F12** requests another dump and changes the eye offset multiplier between `1x` and `15x`.
-
-At Quest-like IPD, x15 is roughly a half-meter lateral perturbation per eye. If `camera+0x260` feeds the world renderer, that should be unmistakable. If the world remains visually unchanged, this matrix is probably only gameplay/cache data or is overwritten before rendering.
-
-### L/R image-difference diagnostic
-
-The temporary GDI capture path now keeps a small CPU-side sample of the latest retained left/right frames and logs a mean absolute RGB difference approximately once per second:
+When FH2VR detects Pause Menu, Photo Mode, World Map, Horizon Hub, Garage or Loading:
 
 ```text
-AER L/R mean RGB diff = 0.42 (normal IPD)
-AER L/R mean RGB diff = 18.37 (F12 x15)
+last gameplay frame -> VR background
+current FH2 frame   -> flat 16:9 menu overlay
 ```
 
-This value is only diagnostic. Motion, head movement and temporal mismatch can raise it even when the camera is identical, so the best comparison is with the car stopped and the headset held still. A large increase when switching from normal IPD to F12 x15 is much more meaningful than the absolute number alone.
+**F2** can force the flat overlay manually, which is useful for the live HUD/minimap while the VR scene remains behind it.
 
-### Recommended test
+The overlay still receives FH2's final composite backbuffer rather than a dedicated UI-only render target.
 
-1. Start FH2 in cockpit view and enable **F10**.
-2. Keep the car stopped and hold the headset as still as practical for a few seconds.
-3. Note the `AER L/R mean RGB diff` values and the dumped `0x260` matrix.
-4. Press **F12**. If the matrix is renderer-facing, the exaggerated lateral shift should be obvious and the L/R diff should usually rise strongly.
-5. Press **F11**. This really swaps the retained textures sent to `Eye_Left` and `Eye_Right`; if the two captures contain useful stereo disparity, the apparent depth should invert or become clearly worse/better.
+## Renderer pipeline
 
-Do not keep testing if the headset causes eye strain, headache, nausea or dizziness.
-
-## Headset preview limitations
-
-The current preview is still a temporary desktop/client capture path:
-
-- capture targets roughly 60 FPS but depends on desktop/GDI throughput;
-- FH2 must be visible and not minimized;
-- another window covering FH2 can appear in the headset;
-- AER frame-to-eye synchronization is approximate because capture is not hooked to the game's real Present yet;
-- temporal differences can inflate the L/R diff diagnostic;
-- per-eye projection/FOV is not yet matched to the HMD;
-- the eventual target is direct renderer capture and properly synchronized per-eye submission.
-
-## Testing without a headset
-
-1. Install FH2VR in FH2ML Manager.
-2. Start FH2 and switch to the **Driver / cockpit** camera.
-3. Press **F6** to enable mock mode.
-4. Hold the arrow keys and verify yaw/pitch.
-5. Press **F8** to recenter.
+```text
+FH2 D3D12 backbuffer (R10G10B10A2)
+        |
+        v
+captured DIRECT queue / Present
+        |
+        v
+retained D3D12 source texture
+        |
+        v
+GPU compute conversion
+R10G10B10A2 -> R8G8B8A8
+        |
+        v
+projection + FOV match
+        |
+        v
+M10 HMD X/Y/Z parallax shift/scale
+        |
+        v
+OpenVR DirectX12 Submit_TextureWithPose
+        |
+        v
+SteamVR / Quest 3
+```
 
 ## Requirements
 
-- Windows x64;
-- Azimuth supported by FH2ML;
-- FH2ML Host API v1;
-- Forza Horizon 2 build 1.0.0.64;
-- SteamVR/OpenVR and a tracked HMD for real VR testing;
-- a D3D11-capable GPU for the temporary preview texture.
+- Windows x64
+- Azimuth
+- Forza Horizon 2 build 1.0.0.64
+- SteamVR/OpenVR
+- D3D12-capable GPU
+- tracked HMD
 
-## Install
+FH2ML is required only for the FH2ML package, not for standalone.
 
-Build or download the FH2VR package and install it as a normal FH2ML mod. The development manifest is enabled by default.
+Current live target: **Meta Quest 3 over wired Quest Link**.
+
+## Install — standalone
+
+Download the GitHub Actions artifact:
+
+```text
+FH2VR-Standalone-0.4.0-dev
+```
+
+The standalone runtime is embedded in `FH2VR.exe`. There is no `Payload/FH2VR.dll` to keep next to it.
+
+Run `FH2VR.exe`, then start Azimuth normally. FH2VR automatically detects `azimuth.exe`, attaches, and waits for the supported FH2 image before initializing the VR runtime.
+
+The tray menu is intentionally minimal:
+
+```text
+FH2VR 0.4.0-dev
+<status>
+----------------
+Exit
+```
+
+Standalone does **not** replace `azimuth-tls.dll`, install a helper, create a `mods` entry, or require FH2ML.
+
+Once FH2 is ready, press **F1** to enable VR. **F2** manually toggles the flat HUD/GUI overlay.
+
+## Install — FH2ML
+
+Download:
+
+```text
+FH2VR-0.4.0-dev
+```
+
+Install it as a normal FH2ML mod. Do not keep multiple installed copies with the same `fh2vr` mod ID.
 
 ## Build
+
+Native runtime / FH2ML package:
 
 ```powershell
 cmake -S . -B build -A x64
@@ -120,27 +143,23 @@ cmake --build build --config Release --parallel
 cmake --install build --config Release --prefix package --component FH2VR
 ```
 
-CMake fetches Valve OpenVR SDK **v2.15.6** at configure time.
+Standalone single-EXE build stages the native runtime as an embedded resource before publishing:
 
-## Reverse-engineering notes
+```powershell
+New-Item -ItemType Directory -Force standalone/Embedded
+Copy-Item build/Release/FH2VR.dll standalone/Embedded/FH2VR.dll
+dotnet publish standalone/FH2VR.Standalone.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true
+```
 
-Confirmed FH2/Extra Options data currently used by the project:
+Dependencies fetched by CMake:
 
-- Driver camera vtable: `0x2E78120`
-- Driver update slot: `0x20`
-- Driver heading/forward: `camera + 0x1C0`
-- view-dirty byte: `camera + 0x21A`
-- Driver FOV callback slot: `0x70`
-- native mounted-camera FOV: `0x10340F0`
-- player manager global: `0x34ABA60`
-- cached camera matrix: separate active-view camera object at `+0x260`
+- Valve OpenVR SDK `v2.15.6`
+- MinHook `v1.3.4`
 
-## Roadmap
+Their upstream license files are packaged under `licenses/`.
 
-1. Use 0.3.2 x15 perturbation, matrix dump and L/R diff logging to decide whether `camera+0x260` affects the world render.
-2. Confirm which graphics API Azimuth exposes for FH2 and hook the real `IDXGISwapChain::Present` path.
-3. Replace GDI capture with direct backbuffer capture and bind eye selection to actual presented frames.
-4. Move to `Submit_TextureWithPose` using the pose associated with each rendered eye frame.
-5. Match OpenVR per-eye projection/FOV using `GetProjectionRaw` and the confirmed FH2 FOV path.
-6. If AER is viable, harden it; otherwise move to depth reprojection or a renderer-level dual-view path.
-7. Add HUD/menu handling, roll and positional 6DoF.
+## Remaining renderer limits
+
+- scene rendering is still mono rather than true geometric stereo;
+- M10 positional parallax is screen/frustum based, not depth-aware;
+- the flat GUI uses the final FH2 composite rather than an isolated HUD/frontend target.
