@@ -14,10 +14,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Configure
+      - name: Configure native runtime
         run: cmake -S . -B build -A x64
 
-      - name: Build
+      - name: Build native runtime
         run: cmake --build build --config Release --parallel
 
       - name: Verify manifest version
@@ -28,10 +28,10 @@ jobs:
           if ($manifest.entry -ne 'FH2VR.dll') { throw "Unexpected entry: $($manifest.entry)" }
           if (-not (Test-Path 'build/Release/FH2VR.dll')) { throw 'FH2VR.dll was not produced' }
 
-      - name: Install package
+      - name: Install FH2ML package
         run: cmake --install build --config Release --prefix package --component FH2VR
 
-      - name: Verify clean package
+      - name: Verify FH2ML package
         shell: pwsh
         run: |
           $expected = @(
@@ -50,9 +50,65 @@ jobs:
             throw "Unexpected package contents. Actual: $($actual -join ', ')"
           }
 
+      - name: Publish standalone app
+        shell: pwsh
+        run: |
+          dotnet publish standalone/FH2VR.Standalone.csproj `
+            -c Release `
+            -r win-x64 `
+            --self-contained true `
+            -p:PublishSingleFile=true `
+            -o standalone-publish
+
+          if (-not (Test-Path 'standalone-publish/FH2VR.exe')) {
+            throw 'Standalone FH2VR.exe was not produced'
+          }
+
+      - name: Package standalone build
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path 'standalone-package/Payload' | Out-Null
+          New-Item -ItemType Directory -Force -Path 'standalone-package/licenses' | Out-Null
+
+          Copy-Item 'standalone-publish/FH2VR.exe' 'standalone-package/FH2VR.exe'
+          Copy-Item 'build/Release/FH2VR.dll' 'standalone-package/Payload/FH2VR.dll'
+          Copy-Item 'README.md' 'standalone-package/README.md'
+          Copy-Item 'THIRD_PARTY.md' 'standalone-package/THIRD_PARTY.md'
+          Copy-Item 'package/licenses/OpenVR-LICENSE.txt' 'standalone-package/licenses/OpenVR-LICENSE.txt'
+          Copy-Item 'package/licenses/MinHook-LICENSE.txt' 'standalone-package/licenses/MinHook-LICENSE.txt'
+
+      - name: Verify standalone package
+        shell: pwsh
+        run: |
+          $expected = @(
+            'FH2VR.exe',
+            'Payload/FH2VR.dll',
+            'README.md',
+            'THIRD_PARTY.md',
+            'licenses/OpenVR-LICENSE.txt',
+            'licenses/MinHook-LICENSE.txt'
+          ) | Sort-Object
+          $actual = Get-ChildItem 'standalone-package' -File -Recurse | ForEach-Object {
+            $_.FullName.Substring((Resolve-Path 'standalone-package').Path.Length + 1).Replace('\\','/')
+          } | Sort-Object
+
+          if ($actual.Count -ne $expected.Count) {
+            throw "Unexpected standalone package file count: $($actual.Count). Actual: $($actual -join ', ')"
+          }
+          if (Compare-Object $expected $actual) {
+            throw "Unexpected standalone package contents. Actual: $($actual -join ', ')"
+          }
+
       - name: Upload FH2ML package
         uses: actions/upload-artifact@v4
         with:
           name: FH2VR-0.4.0-dev
           path: package/
+          if-no-files-found: error
+
+      - name: Upload standalone package
+        uses: actions/upload-artifact@v4
+        with:
+          name: FH2VR-Standalone-0.4.0-dev
+          path: standalone-package/
           if-no-files-found: error
