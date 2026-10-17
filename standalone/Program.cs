@@ -61,43 +61,73 @@ internal static class EmbeddedRuntime
             throw new InvalidOperationException("Embedded FH2VR runtime is empty.");
 
         string hash = Convert.ToHexString(SHA256.HashData(payload)).ToLowerInvariant();
-        string directory = Path.Combine(
+        string runtimeRoot = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "FH2VR", "runtime", hash);
-        string path = Path.Combine(directory, "FH2VR.dll");
+            "FH2VR", "runtime");
+        string hashDirectory = Path.Combine(runtimeRoot, hash);
+        string sessionDirectory = Path.Combine(hashDirectory, Guid.NewGuid().ToString("N"));
+        string path = Path.Combine(sessionDirectory, "FH2VR.dll");
 
-        Directory.CreateDirectory(directory);
+        Directory.CreateDirectory(sessionDirectory);
+        File.WriteAllBytes(path, payload);
 
-        if (File.Exists(path))
+        using (var written = new FileStream(path, FileMode.Open, FileAccess.Read,
+                                            FileShare.ReadWrite | FileShare.Delete))
         {
-            using FileStream existing = File.OpenRead(path);
-            string existingHash = Convert.ToHexString(SHA256.HashData(existing)).ToLowerInvariant();
-            if (existingHash == hash)
-            {
-                log.Write($"Using extracted runtime {hash[..12]} at {path}");
-                return path;
-            }
-        }
-
-        string staged = path + ".new-" + Guid.NewGuid().ToString("N");
-        try
-        {
-            File.WriteAllBytes(staged, payload);
-            using FileStream written = File.OpenRead(staged);
             string writtenHash = Convert.ToHexString(SHA256.HashData(written)).ToLowerInvariant();
             if (writtenHash != hash)
                 throw new InvalidOperationException("Extracted FH2VR runtime failed SHA-256 verification.");
-
-            File.Move(staged, path, overwrite: true);
-        }
-        finally
-        {
-            if (File.Exists(staged))
-                File.Delete(staged);
         }
 
-        log.Write($"Extracted embedded runtime {hash[..12]} to {path}");
+        log.Write($"Extracted embedded runtime {hash[..12]} to isolated session {path}");
+        CleanupOldRuntimeSessions(runtimeRoot, sessionDirectory, log);
         return path;
+    }
+
+    private static void CleanupOldRuntimeSessions(string runtimeRoot,
+                                                  string currentDirectory,
+                                                  FileLog log)
+    {
+        if (!Directory.Exists(runtimeRoot))
+            return;
+
+        foreach (string hashDirectory in Directory.EnumerateDirectories(runtimeRoot))
+        {
+            foreach (string sessionDirectory in Directory.EnumerateDirectories(hashDirectory))
+            {
+                if (string.Equals(sessionDirectory, currentDirectory,
+                                  StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                try
+                {
+                    Directory.Delete(sessionDirectory, recursive: true);
+                    log.Write($"Removed stale runtime session {sessionDirectory}");
+                }
+                catch (IOException)
+                {
+                    // A running Azimuth may still have FH2VR.dll mapped from this
+                    // directory. Leave it alone and retry cleanup next launch.
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    // Same idea: a locked/mapped runtime must never prevent the
+                    // launcher from creating a fresh isolated session.
+                }
+            }
+
+            try
+            {
+                if (!Directory.EnumerateFileSystemEntries(hashDirectory).Any())
+                    Directory.Delete(hashDirectory);
+            }
+            catch (IOException)
+            {
+            }
+            catch (UnauthorizedAccessException)
+            {
+            }
+        }
     }
 }
 
