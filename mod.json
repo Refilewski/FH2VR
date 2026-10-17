@@ -4,7 +4,7 @@
   "version": "0.2.0-dev",
   "author": "Refilewski",
   "entry": "FH2VR.dll",
-  "enabled": false,
+  "enabled": true,
   "priority": 900,
   "dependencies": [],
   "conflicts": [],
