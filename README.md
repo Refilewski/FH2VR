@@ -139,7 +139,9 @@ Download the latest GitHub Actions artifact named:
 FH2VR-0.4.0-dev
 ```
 
-and install it as a normal FH2ML mod. Avoid keeping multiple copies of the mod with the same `fh2vr` ID installed at once.
+The branch, manifest, CMake project and CI artifact now all use the same 0.4.0 development version so test builds are no longer mixed with the old `0.3.2-dev` label.
+
+Install the artifact as a normal FH2ML mod. Avoid keeping multiple copies of the mod with the same `fh2vr` ID installed at once.
 
 ## Build
 
