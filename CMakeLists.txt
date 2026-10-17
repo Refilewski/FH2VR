@@ -21,14 +21,23 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(openvr)
 
+FetchContent_Declare(
+  minhook
+  GIT_REPOSITORY https://github.com/TsudaKageyu/minhook.git
+  GIT_TAG v1.3.4
+  GIT_SHALLOW TRUE
+)
+FetchContent_MakeAvailable(minhook)
+
 add_library(FH2VR SHARED
   src/FH2VR.cpp
   src/HeadsetPreview.cpp
+  src/RendererProbe.cpp
 )
 target_include_directories(FH2VR PRIVATE include)
 target_compile_definitions(FH2VR PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX OPENVR_BUILD_STATIC)
 target_compile_options(FH2VR PRIVATE /W4 /WX /EHsc /utf-8)
-target_link_libraries(FH2VR PRIVATE openvr_api64 user32 gdi32 d3d11 dxgi)
+target_link_libraries(FH2VR PRIVATE openvr_api64 minhook user32 gdi32 d3d11 d3d12 dxgi)
 set_target_properties(FH2VR PROPERTIES OUTPUT_NAME FH2VR)
 
 install(TARGETS FH2VR RUNTIME DESTINATION . COMPONENT FH2VR)
