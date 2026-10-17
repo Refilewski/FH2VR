@@ -88,8 +88,9 @@ jobs:
             'licenses/OpenVR-LICENSE.txt',
             'licenses/MinHook-LICENSE.txt'
           ) | Sort-Object
+          $root = (Resolve-Path 'standalone-package').Path
           $actual = Get-ChildItem 'standalone-package' -File -Recurse | ForEach-Object {
-            $_.FullName.Substring((Resolve-Path 'standalone-package').Path.Length + 1).Replace('\\','/')
+            $_.FullName.Substring($root.Length + 1).Replace('\','/')
           } | Sort-Object
 
           if ($actual.Count -ne $expected.Count) {
