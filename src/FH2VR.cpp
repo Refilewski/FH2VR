@@ -1,4 +1,5 @@
 #include "FH2ML.h"
+#include "HeadsetPreview.h"
 
 #include <openvr.h>
 #include <windows.h>
@@ -12,7 +13,7 @@
 
 namespace {
 constexpr char kModId[] = "fh2vr";
-constexpr char kVersion[] = "0.1.1-dev";
+constexpr char kVersion[] = "0.2.0-dev";
 
 // Forza Horizon 2 Xbox One 1.0.0.64 camera layout, confirmed against the
 // camera hooks used by ForzaHorizon2_ExtraOptions.
@@ -33,6 +34,7 @@ CameraUpdate g_originalCameraUpdate = nullptr;
 std::atomic<bool> g_stop{false};
 std::atomic<bool> g_trackingEnabled{true};
 std::atomic<bool> g_mockMode{false};
+std::atomic<bool> g_previewEnabled{false};
 std::atomic<bool> g_poseValid{false};
 std::atomic<bool> g_recenterRequested{true};
 std::atomic<float> g_yaw{0.0f};
@@ -202,13 +204,26 @@ DWORD WINAPI tracking_thread(void *) {
     bool f6WasDown = false;
     bool f7WasDown = false;
     bool f8WasDown = false;
+    bool f9WasDown = false;
     std::string lastInitError;
+    std::string lastPreviewError;
+    std::string lastCompositorError;
     vr::IVRSystem *system = nullptr;
+    vr::IVRCompositor *compositor = nullptr;
     ULONGLONG nextVrRetryAt = 0;
     ULONGLONG previousTick = GetTickCount64();
     float referenceYaw = 0.0f;
     float referencePitch = 0.0f;
     bool hasReference = false;
+
+    auto shutdown_runtime = [&]() {
+        fh2vr::shutdown_mono_headset_preview();
+        compositor = nullptr;
+        if (system) {
+            vr::VR_Shutdown();
+            system = nullptr;
+        }
+    };
 
     while (!g_stop.load(std::memory_order_relaxed)) {
         const ULONGLONG now = GetTickCount64();
@@ -222,10 +237,7 @@ DWORD WINAPI tracking_thread(void *) {
             g_poseValid.store(false, std::memory_order_release);
 
             if (mock) {
-                if (system) {
-                    vr::VR_Shutdown();
-                    system = nullptr;
-                }
+                shutdown_runtime();
                 hasReference = false;
                 reset_mock_pose();
                 log_message("Mock head tracking enabled; arrow keys control yaw/pitch, F8 recenters");
@@ -259,6 +271,20 @@ DWORD WINAPI tracking_thread(void *) {
             }
         }
 
+        if (key_pressed(VK_F9, f9WasDown)) {
+            const bool enabled = !g_previewEnabled.load(std::memory_order_relaxed);
+            g_previewEnabled.store(enabled, std::memory_order_relaxed);
+            g_poseValid.store(false, std::memory_order_release);
+            shutdown_runtime();
+            hasReference = false;
+            g_recenterRequested.store(true, std::memory_order_relaxed);
+            nextVrRetryAt = 0;
+            lastPreviewError.clear();
+            lastCompositorError.clear();
+            log_message(enabled ? "Experimental mono headset preview enabled; restarting OpenVR as a scene app"
+                                : "Experimental mono headset preview disabled; returning to tracking-only mode");
+        }
+
         if (g_mockMode.load(std::memory_order_relaxed)) {
             update_mock_pose(deltaSeconds);
             Sleep(4);
@@ -268,7 +294,10 @@ DWORD WINAPI tracking_thread(void *) {
         if (!system) {
             if (now >= nextVrRetryAt) {
                 vr::EVRInitError initError = vr::VRInitError_None;
-                system = vr::VR_Init(&initError, vr::VRApplication_Background);
+                const bool preview = g_previewEnabled.load(std::memory_order_relaxed);
+                const vr::EVRApplicationType appType =
+                    preview ? vr::VRApplication_Scene : vr::VRApplication_Background;
+                system = vr::VR_Init(&initError, appType);
                 if (!system || initError != vr::VRInitError_None) {
                     system = nullptr;
                     const char *description = vr::VR_GetVRInitErrorAsEnglishDescription(initError);
@@ -279,10 +308,19 @@ DWORD WINAPI tracking_thread(void *) {
                     }
                     nextVrRetryAt = now + kVrRetryMs;
                 } else {
-                    lastInitError.clear();
-                    hasReference = false;
-                    g_recenterRequested.store(true, std::memory_order_relaxed);
-                    log_message("SteamVR/OpenVR tracking connected; F6 mock, F7 toggle, F8 recenter");
+                    compositor = preview ? vr::VRCompositor() : nullptr;
+                    if (preview && !compositor) {
+                        log_message("OpenVR scene initialized but VRCompositor is unavailable; retrying");
+                        shutdown_runtime();
+                        nextVrRetryAt = now + kVrRetryMs;
+                    } else {
+                        lastInitError.clear();
+                        hasReference = false;
+                        g_recenterRequested.store(true, std::memory_order_relaxed);
+                        log_message(preview
+                                        ? "SteamVR scene/compositor connected; F9 toggles mono headset preview"
+                                        : "SteamVR/OpenVR tracking connected; F6 mock, F7 toggle, F8 recenter, F9 preview");
+                    }
                 }
             }
 
@@ -293,22 +331,57 @@ DWORD WINAPI tracking_thread(void *) {
         }
 
         vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount]{};
-        system->GetDeviceToAbsoluteTrackingPose(vr::TrackingUniverseSeated, 0.0f, poses,
-                                                vr::k_unMaxTrackedDeviceCount);
-        const vr::TrackedDevicePose_t &hmd = poses[vr::k_unTrackedDeviceIndex_Hmd];
-        if (hmd.bDeviceIsConnected && hmd.bPoseIsValid) {
-            publish_pose(hmd.mDeviceToAbsoluteTracking, referenceYaw, referencePitch, hasReference);
+        const bool preview = g_previewEnabled.load(std::memory_order_relaxed);
+        bool posesReady = true;
+
+        if (preview && compositor) {
+            const vr::EVRCompositorError waitResult =
+                compositor->WaitGetPoses(poses, vr::k_unMaxTrackedDeviceCount, nullptr, 0);
+            if (waitResult != vr::VRCompositorError_None) {
+                const std::string error =
+                    "OpenVR WaitGetPoses failed (error " + std::to_string(static_cast<int>(waitResult)) + ")";
+                if (error != lastCompositorError) {
+                    log_message(error);
+                    lastCompositorError = error;
+                }
+                posesReady = false;
+            } else {
+                lastCompositorError.clear();
+            }
+        } else {
+            system->GetDeviceToAbsoluteTrackingPose(vr::TrackingUniverseSeated, 0.0f, poses,
+                                                    vr::k_unMaxTrackedDeviceCount);
+        }
+
+        if (posesReady) {
+            const vr::TrackedDevicePose_t &hmd = poses[vr::k_unTrackedDeviceIndex_Hmd];
+            if (hmd.bDeviceIsConnected && hmd.bPoseIsValid) {
+                publish_pose(hmd.mDeviceToAbsoluteTracking, referenceYaw, referencePitch, hasReference);
+            } else {
+                g_poseValid.store(false, std::memory_order_release);
+            }
         } else {
             g_poseValid.store(false, std::memory_order_release);
         }
 
-        Sleep(4);
+        if (preview && compositor) {
+            std::string previewError;
+            if (!fh2vr::submit_mono_headset_preview(compositor, previewError)) {
+                if (previewError != lastPreviewError) {
+                    log_message("Mono headset preview: " + previewError);
+                    lastPreviewError = previewError;
+                }
+            } else if (!lastPreviewError.empty()) {
+                log_message("Mono headset preview recovered");
+                lastPreviewError.clear();
+            }
+        } else {
+            Sleep(4);
+        }
     }
 
     g_poseValid.store(false, std::memory_order_release);
-    if (system) {
-        vr::VR_Shutdown();
-    }
+    shutdown_runtime();
     return 0;
 }
 
@@ -394,7 +467,7 @@ extern "C" __declspec(dllexport) int FH2ML_Initialize(const FH2ML_HostAPI *api) 
     }
     CloseHandle(thread);
 
-    log_message("FH2VR 0.1.1-dev initialized: F6 keyboard mock, F7 toggle, F8 recenter");
+    log_message("FH2VR 0.2.0-dev initialized: F6 mock, F7 toggle, F8 recenter, F9 mono preview");
     return 1;
 }
 

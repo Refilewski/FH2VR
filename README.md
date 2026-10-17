@@ -2,18 +2,18 @@
 
 Experimental VR/head-tracking mod for **Forza Horizon 2 Xbox One 1.0.0.64 on Azimuth**, built as a native FH2ML mod.
 
-## Current status: 0.1.1-dev prototype
+## Current status: 0.2.0-dev prototype
 
-This is **not full stereoscopic VR yet**. The current milestone proves the camera path:
+This is **not full stereoscopic VR yet**. The current prototype proves two important paths:
 
 - reads live HMD orientation from SteamVR through OpenVR;
+- hooks the FH2 **Driver / cockpit** camera through FH2ML and applies head yaw/pitch;
 - can run without a headset through a keyboard mock head-tracking mode;
-- hooks the FH2 **Driver / cockpit** camera through FH2ML;
-- applies head yaw and pitch after the game's normal mounted-camera update;
+- has an experimental **mono headset preview** that captures the visible FH2 client area, uploads it to a D3D11 texture and submits the same image to both eyes through the OpenVR compositor;
 - chains the camera callback that was present when FH2VR initialized, so an already-loaded camera mod can remain in the chain;
 - uses FH2ML `GetGameModule`, `RegisterMod`, `RegisterPatch` and `Log` instead of scanning the process.
 
-Roll, positional 6DoF movement and stereo eye rendering are later milestones.
+The mono preview is only a compositor/capture milestone. It is not stereo, does not use per-eye projection and is intentionally separate from the final render-hook design.
 
 ## Controls
 
@@ -22,8 +22,29 @@ Roll, positional 6DoF movement and stereo eye rendering are later milestones.
 - **Up / Down Arrow** — mock pitch.
 - **F7** — toggle head tracking globally.
 - **F8** — recenter. In mock mode this resets yaw/pitch to zero; with a real HMD it uses the current headset direction as forward.
+- **F9** — toggle the experimental mono headset preview.
 
 The first valid SteamVR pose is automatically used as the initial center.
+
+## Testing real hardware
+
+1. Start Meta Quest Link / SteamVR and confirm the HMD is tracked.
+2. Install and enable FH2VR in FH2ML Manager.
+3. Start FH2 and switch to the **Driver / cockpit** camera.
+4. Confirm yaw/pitch head tracking works and press **F8** if you need to recenter.
+5. Press **F9** to restart OpenVR as a scene application and begin submitting the mono FH2 preview to the headset.
+6. Press **F9** again to leave compositor mode and return to tracking-only mode.
+
+### Mono preview limitations
+
+The first preview deliberately uses a simple capture path so the compositor can be validated before reverse-engineering FH2's renderer:
+
+- the same image is submitted to both eyes, so there is no stereoscopic depth yet;
+- capture is currently limited to roughly 30 FPS;
+- FH2 must be visible and not minimized;
+- because the prototype captures the displayed client region, another window covering the game can appear in the headset preview;
+- aspect ratio/FOV are not yet corrected for the HMD;
+- the eventual target is a direct render/view/projection hook, not desktop capture.
 
 ## Testing without a headset
 
@@ -43,7 +64,8 @@ Mock mode bypasses SteamVR pose reading while it is enabled, so an HMD does not 
 - Azimuth supported by your FH2ML installation;
 - FH2ML with Host API v1;
 - Forza Horizon 2 build 1.0.0.64;
-- SteamVR/OpenVR runtime and a tracked HMD only when testing real headset tracking.
+- SteamVR/OpenVR runtime and a tracked HMD for real headset tracking/preview;
+- a D3D11-capable GPU for the experimental mono preview texture.
 
 The tracking worker runs outside FH2ML's synchronous native initializer. If OpenVR is unavailable, FH2VR keeps handling hotkeys and retries SteamVR periodically instead of blocking game startup.
 
@@ -57,6 +79,8 @@ The manifest is disabled by default while this is an experimental prototype. Ena
 
 FH2VR hooks the Driver camera vtable update slot and calls whatever callback was already there before applying head movement. This is intentionally friendly to existing camera hooks. However, a mod loaded **after** FH2VR that replaces the same slot can still override FH2VR; patch overlap should be treated as an ordering issue during the prototype phase.
 
+The F9 preview temporarily initializes OpenVR as a scene application because compositor submission is not available to the normal tracking-only background mode.
+
 ## Build
 
 ```powershell
@@ -69,10 +93,11 @@ CMake fetches Valve OpenVR SDK **v2.15.6** at configure time. No OpenVR binaries
 
 ## Roadmap
 
-1. Validate cockpit yaw/pitch through keyboard mock mode and then on real hardware; correct axis/sign mapping if required.
-2. Add roll and positional head movement after identifying the full mounted-camera basis/position safely.
-3. Find and hook FH2's view/projection path.
-4. Render per-eye views and submit them to a VR compositor.
-5. Add VR-specific HUD/menu handling and comfort options.
+1. Validate the experimental mono compositor preview on real Quest hardware.
+2. Replace desktop/client capture with a direct FH2/DXGI render-target hook.
+3. Find and hook FH2's full view/projection path.
+4. Add roll and positional 6DoF movement using the complete camera basis/position.
+5. Render independent left/right eye views with correct IPD and projection and submit them to the VR compositor.
+6. Add VR-specific HUD/menu handling and comfort options.
 
-The current target is intentionally simple: **prove that FH2's cockpit camera can be driven reliably before touching stereo rendering**.
+The current target is intentionally incremental: **first prove the FH2 image can reach the headset reliably, then move capture into the renderer and split it into true per-eye views**.
