@@ -11,6 +11,8 @@ namespace {
 constexpr uintptr_t kExpectedGameBase = 0x140000000ull;
 constexpr uintptr_t kDriverCameraVtableRva = 0x2E78120;
 constexpr uintptr_t kCameraUpdateSlot = 0x20;
+constexpr uintptr_t kCameraFovSlot = 0x70;
+constexpr uintptr_t kMountedBaseFovOffset = 0x1D0;
 constexpr uintptr_t kPlayerManagerRva = 0x34ABA60;
 constexpr uintptr_t kViewVtableA = 0x2C66188;
 constexpr uintptr_t kViewVtableB = 0x2E6E890;
@@ -19,6 +21,7 @@ constexpr uintptr_t kCachedViewMatrixOffset = 0x260;
 constexpr size_t kDriverScanBytes = 0x400;
 
 using CameraUpdateFn = void (*)(void *, float, unsigned char);
+using CameraGetFovFn = float (*)(void *);
 
 CameraUpdateFn g_previousCameraUpdate = nullptr;
 uintptr_t g_gameBase = 0;
@@ -106,6 +109,47 @@ float *resolve_cached_view_matrix() {
 bool read_matrix12(float &value) {
     float *matrix = resolve_cached_view_matrix();
     return matrix && read_value(matrix + 12, value) && std::isfinite(value);
+}
+
+bool read_driver_fov_diagnostics(void *camera, float &callbackFov,
+                                 float &mountedBaseRadians,
+                                 void **callbackAddress) {
+    callbackFov = 0.0f;
+    mountedBaseRadians = 0.0f;
+    if (callbackAddress) {
+        *callbackAddress = nullptr;
+    }
+    if (!camera) {
+        return false;
+    }
+
+    void *vtable = nullptr;
+    if (!read_pointer(camera, &vtable)) {
+        return false;
+    }
+
+    void *callback = nullptr;
+    if (!read_pointer(static_cast<unsigned char *>(vtable) + kCameraFovSlot, &callback) ||
+        !callback) {
+        return false;
+    }
+
+    if (!read_value(static_cast<unsigned char *>(camera) + kMountedBaseFovOffset,
+                    mountedBaseRadians) ||
+        !std::isfinite(mountedBaseRadians) || mountedBaseRadians <= 0.0f) {
+        return false;
+    }
+
+    const auto getFov = reinterpret_cast<CameraGetFovFn>(callback);
+    callbackFov = getFov(camera);
+    if (!std::isfinite(callbackFov)) {
+        return false;
+    }
+
+    if (callbackAddress) {
+        *callbackAddress = callback;
+    }
+    return true;
 }
 
 void scan_driver_camera(void *camera) {
@@ -198,13 +242,31 @@ void camera_probe_hook(void *camera, float dt, unsigned char reset) {
                               ? static_cast<double>(updates) * 1000.0 /
                                     static_cast<double>(elapsed)
                               : 0.0;
-        char buffer[256]{};
+        char buffer[384]{};
         std::snprintf(buffer, sizeof(buffer),
                       "Fixed camera %.2f updates/s; 0x260 persisted=%llu rebuilt=%llu",
                       hz,
                       static_cast<unsigned long long>(persisted),
                       static_cast<unsigned long long>(rebuilt));
         log_line(buffer);
+
+        float callbackFov = 0.0f;
+        float mountedBaseRadians = 0.0f;
+        void *fovCallback = nullptr;
+        if (read_driver_fov_diagnostics(camera, callbackFov,
+                                        mountedBaseRadians, &fovCallback)) {
+            constexpr float kRadToDeg = 57.2957795130823208768f;
+            const float mountedBaseDegrees = mountedBaseRadians * kRadToDeg;
+            char fovBuffer[384]{};
+            std::snprintf(
+                fovBuffer, sizeof(fovBuffer),
+                "Driver FOV diagnostic: callback=%p result=%.7f camera+0x1D0=%.7f rad (%.3f deg)",
+                fovCallback, callbackFov, mountedBaseRadians, mountedBaseDegrees);
+            log_line(fovBuffer);
+        } else {
+            log_line("Driver FOV diagnostic: unavailable for current camera object");
+        }
+
         g_lastStatsLogAt = now;
     }
 }
