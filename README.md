@@ -17,7 +17,7 @@ FH2VR now has a native D3D12 -> OpenVR path. Live testing on Quest 3 has confirm
 
 The remaining major visual problem is a strong cross-eye / projection mismatch. Removing GDI/BitBlt did not remove it, so the current focus is projection/FOV rather than capture.
 
-## Current M4 projection diagnostic
+## Current M4.1 projection + FOV diagnostic
 
 M4 keeps the proven M3 D3D12 capture + R10->R8 conversion path and changes only the OpenVR submit stage.
 
@@ -41,15 +41,17 @@ boundsR=[...]
 M4 OpenVR per-eye projection submit OK
 ```
 
-This is still a projection diagnostic, not true stereo rendering.
-
-## Driver FOV diagnostics
-
-The Driver camera probe also records the currently active FH2 mounted-camera FOV path without changing it:
+M4.1 additionally logs the live FH2 Driver-camera FOV path without changing it:
 
 ```text
 Driver FOV diagnostic: callback=... result=... camera+0x1D0=... rad (... deg)
 ```
+
+This lets one runtime test compare the HMD-required combined frustum against FH2's actual mounted-camera FOV.
+
+This is still a projection diagnostic, not true stereo rendering.
+
+## Confirmed camera/FOV data
 
 Relevant confirmed FH2/Extra Options data:
 
@@ -77,7 +79,7 @@ The old `camera+0x260` AER path is kept only as a diagnostic. At the observed ~3
 - **F11** — legacy AER compositor eye swap
 - **F12** — legacy x15 matrix perturbation + Driver camera scan request
 
-For current M4 testing, use **F9 only** unless specifically testing one of the legacy diagnostics.
+For current M4/M4.1 testing, use **F9 only** unless specifically testing one of the legacy diagnostics.
 
 ## Renderer pipeline
 
@@ -105,7 +107,7 @@ OpenVR DirectX12 submit
 SteamVR / Quest 3
 ```
 
-## Testing M4
+## Testing M4.1
 
 1. Install the latest `FH2VR-0.4.0-dev` artifact.
 2. Start FH2 and enter Driver/cockpit view.
@@ -151,6 +153,8 @@ CMake fetches:
 
 - Valve OpenVR SDK `v2.15.6`
 - MinHook `v1.3.4`
+
+The package also carries their upstream license files under `licenses/`.
 
 ## Roadmap
 
