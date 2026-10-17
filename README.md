@@ -2,7 +2,7 @@
 
 Experimental VR/head-tracking mod for **Forza Horizon 2 Xbox One 1.0.0.64 on Azimuth**, built as a native FH2ML mod.
 
-## Current status: 0.3.0-dev prototype
+## Current status: 0.3.1-dev prototype
 
 This is still experimental. The current build proves several VR paths:
 
@@ -23,12 +23,12 @@ The AER probe is not yet final VR: projection asymmetry, frame/eye synchronizati
 - **F7** — toggle head tracking globally.
 - **F8** — recenter.
 - **F9** — toggle headset preview.
-- **F10** — toggle experimental AER. Enabling it also enables the headset preview.
-- **F11** — swap the retained AER eye assignment if stereo depth appears inverted.
+- **F10** — toggle experimental AER. Enabling it also enables the headset preview and resets eye swapping.
+- **F11** — swap the actual left/right textures submitted to the OpenVR compositor.
 
 The first valid SteamVR pose is automatically used as the initial center.
 
-## 0.3.0-dev AER experiment
+## 0.3.1-dev AER experiment
 
 The probe uses `IVRSystem::GetEyeToHeadTransform` for the real runtime-provided left/right eye offsets instead of hard-coding IPD.
 
@@ -45,18 +45,18 @@ GAME_RVA_PLAYER_MANAGER (0x34ABA60)
  -> camera + 0x260 (4x4 matrix)
 ```
 
-Extra Options identifies `[2,6,10]` as the third matrix column/look direction. The AER probe therefore treats `[0,4,8]` as camera-right and applies the per-eye lateral translation through the fourth column `[3,7,11]`.
+Extra Options identifies `[2,6,10]` as the third matrix column/look direction. That layout matches the usual DirectX row-vector view matrix convention where the basis vectors are stored in columns and view translation lives in `[12,13,14]`. The 0.3.1 probe therefore applies lateral eye translation through `matrix[12] -= eyeX` instead of modifying `[3,7,11]` as 0.3.0 did.
 
-This is intentionally a live hypothesis test. If FH2's cached-matrix convention differs, the probe may show inverted depth or no visible positional shift. `F11` handles the simplest left/right assignment inversion, but a matrix-layout mismatch needs code changes.
+This is still a live hypothesis test. If `camera+0x260` is only a gameplay/cache matrix and is not consumed by the final renderer, the two retained frames can still be visually identical. The next renderer-facing step would then be a real Present/backbuffer hook and matrix/depth investigation.
 
 ### What to look for
 
 With AER enabled in cockpit view:
 
 1. The FH2ML log should show OpenVR left/right eye offsets.
-2. The first successful camera write should log `AER probe reached cached FH2 view matrix at camera+0x260`.
+2. The first successful camera write should log `AER probe reached cached FH2 view matrix at camera+0x260` and the before/after `matrix[12]` value.
 3. Near cockpit geometry should have noticeable left/right parallax compared with the distant road/world.
-4. If depth appears inverted, press **F11** once.
+4. Press **F11**. In 0.3.1 this now really swaps the textures sent to `Eye_Left` and `Eye_Right`. If the two eye renders are genuinely different, the stereo depth should visibly invert or become much worse/better.
 
 Do not use this prototype for long sessions if it causes eye strain or discomfort.
 
@@ -117,7 +117,7 @@ Confirmed FH2/Extra Options data currently used by the project:
 
 ## Roadmap
 
-1. Validate the 0.3 AER matrix/eye-offset hypothesis on Quest 3.
+1. Validate the corrected 0.3.1 AER translation and true F11 eye swap on Quest 3.
 2. Confirm which graphics API Azimuth exposes for FH2 and hook the real Present path.
 3. Replace GDI capture with direct backbuffer capture.
 4. Synchronize eye selection to actual rendered frames.
