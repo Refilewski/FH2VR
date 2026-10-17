@@ -228,43 +228,6 @@ bool capture_game_client(std::string &error) {
     return true;
 }
 
-vr::VRTextureBounds_t aspect_correct_bounds() {
-    vr::VRTextureBounds_t bounds{0.0f, 0.0f, 1.0f, 1.0f};
-    vr::IVRSystem *system = vr::VRSystem();
-    if (!system || g_preview.width <= 0 || g_preview.height <= 0) {
-        return bounds;
-    }
-
-    std::uint32_t recommendedWidth = 0;
-    std::uint32_t recommendedHeight = 0;
-    system->GetRecommendedRenderTargetSize(&recommendedWidth, &recommendedHeight);
-    if (recommendedWidth == 0 || recommendedHeight == 0) {
-        return bounds;
-    }
-
-    const float sourceAspect =
-        static_cast<float>(g_preview.width) / static_cast<float>(g_preview.height);
-    const float eyeAspect =
-        static_cast<float>(recommendedWidth) / static_cast<float>(recommendedHeight);
-
-    // OpenVR maps the submitted bounds across the full eye surface. A normal FH2
-    // window is much wider than one VR eye, so submitting the full 16:9 texture
-    // squeezes it horizontally. Center-crop the source to the HMD eye aspect instead.
-    if (sourceAspect > eyeAspect) {
-        const float visibleWidth = eyeAspect / sourceAspect;
-        const float margin = (1.0f - visibleWidth) * 0.5f;
-        bounds.uMin = margin;
-        bounds.uMax = 1.0f - margin;
-    } else if (sourceAspect < eyeAspect) {
-        const float visibleHeight = sourceAspect / eyeAspect;
-        const float margin = (1.0f - visibleHeight) * 0.5f;
-        bounds.vMin = margin;
-        bounds.vMax = 1.0f - margin;
-    }
-
-    return bounds;
-}
-
 std::string compositor_error(const char *eye, vr::EVRCompositorError result) {
     return std::string("OpenVR compositor Submit(") + eye + ") failed (error " +
            std::to_string(static_cast<int>(result)) + ")";
@@ -289,7 +252,7 @@ bool submit_mono_headset_preview(vr::IVRCompositor *compositor, std::string &err
     }
 
     vr::Texture_t texture{g_preview.texture.Get(), vr::TextureType_DirectX, vr::ColorSpace_Gamma};
-    const vr::VRTextureBounds_t bounds = aspect_correct_bounds();
+    vr::VRTextureBounds_t bounds{0.0f, 0.0f, 1.0f, 1.0f};
 
     const vr::EVRCompositorError left =
         compositor->Submit(vr::Eye_Left, &texture, &bounds, vr::Submit_Default);
