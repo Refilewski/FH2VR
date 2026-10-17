@@ -2,20 +2,18 @@
 
 Experimental VR/head-tracking mod for **Forza Horizon 2 Xbox One 1.0.0.64 on Azimuth**, built as a native FH2ML mod.
 
-## Current status: 0.2.1-dev prototype
+## Current status: 0.3.0-dev prototype
 
-This is **not full stereoscopic VR yet**. The current prototype proves two important paths:
+This is still experimental. The current build proves several VR paths:
 
 - reads live HMD orientation from SteamVR through OpenVR;
 - hooks the FH2 **Driver / cockpit** camera through FH2ML and applies head yaw/pitch;
 - can run without a headset through a keyboard mock head-tracking mode;
-- has an experimental **mono headset preview** that captures the visible FH2 client area, uploads it to a D3D11 texture and submits the same image to both eyes through the OpenVR compositor;
-- center-crops the mono source to the headset's recommended per-eye aspect ratio instead of stretching the full 16:9 frame;
-- targets roughly 60 FPS for the temporary GDI capture path instead of the original 30 FPS cap;
-- chains the camera callback that was present when FH2VR initialized, so an already-loaded camera mod can remain in the chain;
-- uses FH2ML `GetGameModule`, `RegisterMod`, `RegisterPatch` and `Log` instead of scanning the process.
+- has a temporary GDI -> D3D11 -> OpenVR headset preview path;
+- includes an experimental **alternate-eye rendering (AER) probe** that alternates a real OpenVR eye offset against FH2's cached camera matrix and retains separate left/right preview textures;
+- keeps the previous mono preview as a fallback.
 
-The mono preview is only a compositor/capture milestone. It is not stereo, does not use per-eye projection and is intentionally separate from the final render-hook design.
+The AER probe is not yet final VR: projection asymmetry, frame/eye synchronization and direct renderer capture still need work.
 
 ## Controls
 
@@ -23,66 +21,76 @@ The mono preview is only a compositor/capture milestone. It is not stereo, does 
 - **Left / Right Arrow** — mock yaw.
 - **Up / Down Arrow** — mock pitch.
 - **F7** — toggle head tracking globally.
-- **F8** — recenter. In mock mode this resets yaw/pitch to zero; with a real HMD it uses the current headset direction as forward.
-- **F9** — toggle the experimental mono headset preview.
+- **F8** — recenter.
+- **F9** — toggle headset preview.
+- **F10** — toggle experimental AER. Enabling it also enables the headset preview.
+- **F11** — swap the retained AER eye assignment if stereo depth appears inverted.
 
 The first valid SteamVR pose is automatically used as the initial center.
 
-## Testing real hardware
+## 0.3.0-dev AER experiment
 
-1. Start Meta Quest Link / SteamVR and confirm the HMD is tracked.
-2. Install FH2VR in FH2ML Manager.
-3. Start FH2 and switch to the **Driver / cockpit** camera.
-4. Confirm yaw/pitch head tracking works and press **F8** if you need to recenter.
-5. Press **F9** to restart OpenVR as a scene application and begin submitting the mono FH2 preview to the headset.
-6. Press **F9** again to leave compositor mode and return to tracking-only mode.
+The probe uses `IVRSystem::GetEyeToHeadTransform` for the real runtime-provided left/right eye offsets instead of hard-coding IPD.
 
-### Mono preview limitations
+For the FH2 camera side it follows the camera chain confirmed by Extra Options:
 
-The preview deliberately uses a simple capture path so the compositor can be validated before reverse-engineering FH2's renderer:
+```text
+GAME_RVA_PLAYER_MANAGER (0x34ABA60)
+ -> game + 0x48
+ -> simulation + 0x98
+ -> manager + 0x2D0
+ -> views -> active view
+ -> view + 0xC0
+ -> cached camera
+ -> camera + 0x260 (4x4 matrix)
+```
 
-- the same image is submitted to both eyes, so there is no stereoscopic depth yet;
-- capture now targets roughly 60 FPS, but actual throughput depends on the desktop/GDI capture path and game resolution;
+Extra Options identifies `[2,6,10]` as the third matrix column/look direction. The AER probe therefore treats `[0,4,8]` as camera-right and applies the per-eye lateral translation through the fourth column `[3,7,11]`.
+
+This is intentionally a live hypothesis test. If FH2's cached-matrix convention differs, the probe may show inverted depth or no visible positional shift. `F11` handles the simplest left/right assignment inversion, but a matrix-layout mismatch needs code changes.
+
+### What to look for
+
+With AER enabled in cockpit view:
+
+1. The FH2ML log should show OpenVR left/right eye offsets.
+2. The first successful camera write should log `AER probe reached cached FH2 view matrix at camera+0x260`.
+3. Near cockpit geometry should have noticeable left/right parallax compared with the distant road/world.
+4. If depth appears inverted, press **F11** once.
+
+Do not use this prototype for long sessions if it causes eye strain or discomfort.
+
+## Headset preview limitations
+
+The current preview is still a temporary desktop/client capture path:
+
+- capture targets roughly 60 FPS but depends on desktop/GDI throughput;
 - FH2 must be visible and not minimized;
-- because the prototype captures the displayed client region, another window covering the game can appear in the headset preview;
-- the source is center-cropped to the HMD eye aspect to avoid horizontal squeezing, so some left/right content is intentionally lost;
-- the game's real projection/FOV is still not matched to the HMD;
-- the eventual target is a direct D3D12/DXGI render/view/projection hook, not desktop capture.
+- another window covering FH2 can appear in the headset;
+- AER frame-to-eye synchronization is approximate because capture is not hooked to the game's real Present yet;
+- per-eye projection/FOV is not yet matched to the HMD;
+- the eventual target is direct renderer capture and properly synchronized per-eye submission.
 
 ## Testing without a headset
-
-You can validate the FH2 camera hook without SteamVR hardware:
 
 1. Install FH2VR in FH2ML Manager.
 2. Start FH2 and switch to the **Driver / cockpit** camera.
 3. Press **F6** to enable mock mode.
-4. Hold the arrow keys and verify that the cockpit view follows yaw/pitch input.
-5. Press **F8** to return to the centered view.
-
-Mock mode bypasses SteamVR pose reading while it is enabled, so an HMD does not need to be connected.
+4. Hold the arrow keys and verify yaw/pitch.
+5. Press **F8** to recenter.
 
 ## Requirements
 
 - Windows x64;
-- Azimuth supported by your FH2ML installation;
-- FH2ML with Host API v1;
+- Azimuth supported by FH2ML;
+- FH2ML Host API v1;
 - Forza Horizon 2 build 1.0.0.64;
-- SteamVR/OpenVR runtime and a tracked HMD for real headset tracking/preview;
-- a D3D11-capable GPU for the temporary mono preview texture.
-
-The tracking worker runs outside FH2ML's synchronous native initializer. If OpenVR is unavailable, FH2VR keeps handling hotkeys and retries SteamVR periodically instead of blocking game startup.
+- SteamVR/OpenVR and a tracked HMD for real VR testing;
+- a D3D11-capable GPU for the temporary preview texture.
 
 ## Install
 
-Build or download the FH2VR package, then install it as a normal FH2ML mod. The package contains `FH2VR.dll`, `mod.json`, `README.md` and `THIRD_PARTY.md`.
-
-The current development manifest is enabled by default so fresh test packages load without requiring an extra toggle in FH2ML Manager.
-
-## Compatibility note
-
-FH2VR hooks the Driver camera vtable update slot and calls whatever callback was already there before applying head movement. This is intentionally friendly to existing camera hooks. However, a mod loaded **after** FH2VR that replaces the same slot can still override FH2VR; patch overlap should be treated as an ordering issue during the prototype phase.
-
-The F9 preview temporarily initializes OpenVR as a scene application because compositor submission is not available to the normal tracking-only background mode.
+Build or download the FH2VR package and install it as a normal FH2ML mod. The development manifest is enabled by default.
 
 ## Build
 
@@ -92,20 +100,27 @@ cmake --build build --config Release --parallel
 cmake --install build --config Release --prefix package --component FH2VR
 ```
 
-CMake fetches Valve OpenVR SDK **v2.15.6** at configure time. No OpenVR binaries are committed to this repository.
+CMake fetches Valve OpenVR SDK **v2.15.6** at configure time.
 
 ## Reverse-engineering notes
 
-Extra Options confirms that the Driver camera vtable is at RVA `0x2E78120`. Its FOV callback lives at vtable slot `0x70`, and the native mounted-camera FOV routine is at RVA `0x10340F0`. Those addresses give FH2VR a concrete next path for matching the game's camera FOV to the HMD before the full per-eye projection hook is found.
+Confirmed FH2/Extra Options data currently used by the project:
+
+- Driver camera vtable: `0x2E78120`
+- Driver update slot: `0x20`
+- Driver heading/forward: `camera + 0x1C0`
+- view-dirty byte: `camera + 0x21A`
+- Driver FOV callback slot: `0x70`
+- native mounted-camera FOV: `0x10340F0`
+- player manager global: `0x34ABA60`
+- cached camera matrix: separate active-view camera object at `+0x260`
 
 ## Roadmap
 
-1. Validate the faster aspect-correct mono compositor preview on real Quest hardware.
-2. Hook/override the Driver camera FOV using the confirmed mounted-camera FOV path.
-3. Replace desktop/client capture with a direct FH2 D3D12/DXGI render-target hook.
-4. Find and hook FH2's full view/projection path.
-5. Add roll and positional 6DoF movement using the complete camera basis/position.
-6. Render independent left/right eye views with correct IPD and projection and submit them to the VR compositor.
-7. Add VR-specific HUD/menu handling and comfort options.
-
-The current target is intentionally incremental: **first make the mono headset path comfortable enough to test, then move capture into the renderer and split it into true per-eye views**.
+1. Validate the 0.3 AER matrix/eye-offset hypothesis on Quest 3.
+2. Confirm which graphics API Azimuth exposes for FH2 and hook the real Present path.
+3. Replace GDI capture with direct backbuffer capture.
+4. Synchronize eye selection to actual rendered frames.
+5. Match OpenVR per-eye projection/FOV.
+6. If AER is viable, harden it; otherwise move to depth reprojection or a renderer-level dual-view path.
+7. Add HUD/menu handling, roll and positional 6DoF.
