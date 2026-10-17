@@ -6,7 +6,11 @@
 
 namespace fh2vr {
 
-bool submit_mono_headset_preview(vr::IVRCompositor *compositor, std::string &error);
-void shutdown_mono_headset_preview();
+// Captures the latest visible FH2 frame. In mono mode the same texture is sent
+// to both eyes. In alternating-eye mode the frame is stored for sourceEye and
+// the latest retained left/right textures are submitted together.
+bool submit_headset_preview(vr::IVRCompositor *compositor, bool alternatingEyes, int sourceEye,
+                            std::string &error);
+void shutdown_headset_preview();
 
 } // namespace fh2vr
