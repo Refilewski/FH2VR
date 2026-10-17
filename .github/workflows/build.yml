@@ -24,7 +24,7 @@ jobs:
         shell: pwsh
         run: |
           $manifest = Get-Content mod.json -Raw | ConvertFrom-Json
-          if ($manifest.version -ne '0.3.0-dev') { throw "Unexpected mod version: $($manifest.version)" }
+          if ($manifest.version -ne '0.3.1-dev') { throw "Unexpected mod version: $($manifest.version)" }
           if ($manifest.entry -ne 'FH2VR.dll') { throw "Unexpected entry: $($manifest.entry)" }
           if (-not (Test-Path 'build/Release/FH2VR.dll')) { throw 'FH2VR.dll was not produced' }
 
@@ -46,6 +46,6 @@ jobs:
       - name: Upload FH2ML package
         uses: actions/upload-artifact@v4
         with:
-          name: FH2VR-0.3.0-dev
+          name: FH2VR-0.3.1-dev
           path: package/
           if-no-files-found: error

@@ -13,7 +13,7 @@
 
 namespace {
 constexpr char kModId[] = "fh2vr";
-constexpr char kVersion[] = "0.3.0-dev";
+constexpr char kVersion[] = "0.3.1-dev";
 
 // Forza Horizon 2 Xbox One 1.0.0.64 camera layout, confirmed against the
 // camera hooks used by ForzaHorizon2_ExtraOptions.
@@ -181,21 +181,19 @@ bool apply_aer_eye_offset(int eye) {
         return false;
     }
 
-    // Extra Options identifies [2,6,10] as the third column/look direction.
-    // Treat the first column as camera-right and the fourth column as position.
-    // This is deliberately an experimental probe; F11 swaps the retained eye
-    // assignment if the live game's convention is opposite to OpenVR's.
-    float rightX = matrix[0];
-    float rightY = matrix[4];
-    float rightZ = matrix[8];
-    const float length = std::sqrt(rightX * rightX + rightY * rightY + rightZ * rightZ);
-    if (!std::isfinite(length) || length < 0.5f || length > 1.5f) {
+    // Extra Options confirms [2,6,10] is the third column/look direction. That
+    // layout matches the common DirectX row-vector view matrix convention:
+    // basis vectors are columns and view translation lives in [12,13,14].
+    // Moving the physical camera along its local right axis by eyeX changes only
+    // the X view-translation term by -eyeX. This is still a live FH2 hypothesis,
+    // but it is a substantially better fit than the old [3,7,11] probe.
+    const float rightX = matrix[0];
+    const float rightY = matrix[4];
+    const float rightZ = matrix[8];
+    const float rightLength = std::sqrt(rightX * rightX + rightY * rightY + rightZ * rightZ);
+    if (!std::isfinite(rightLength) || rightLength < 0.5f || rightLength > 1.5f) {
         return false;
     }
-
-    rightX /= length;
-    rightY /= length;
-    rightZ /= length;
 
     const float eyeX = eye == 0 ? g_leftEyeX.load(std::memory_order_relaxed)
                                 : g_rightEyeX.load(std::memory_order_relaxed);
@@ -203,16 +201,17 @@ bool apply_aer_eye_offset(int eye) {
         return false;
     }
 
-    matrix[3] += rightX * eyeX;
-    matrix[7] += rightY * eyeX;
-    matrix[11] += rightZ * eyeX;
+    const float translationBefore = matrix[12];
+    matrix[12] -= eyeX;
 
     if (!write_memory(matrixAddress, matrix, sizeof(matrix))) {
         return false;
     }
 
     if (!g_aerMatrixTouched.exchange(true, std::memory_order_acq_rel)) {
-        log_message("AER probe reached cached FH2 view matrix at camera+0x260");
+        log_message("AER probe reached cached FH2 view matrix at camera+0x260; matrix[12] " +
+                    std::to_string(translationBefore) + " -> " + std::to_string(matrix[12]) +
+                    " for " + (eye == 0 ? std::string("left") : std::string("right")) + " eye");
     }
     return true;
 }
@@ -460,6 +459,7 @@ DWORD WINAPI tracking_thread(void *) {
         if (key_pressed(VK_F10, f10WasDown)) {
             const bool enabled = !g_aerEnabled.load(std::memory_order_relaxed);
             g_aerEnabled.store(enabled, std::memory_order_relaxed);
+            g_aerSwapEyes.store(false, std::memory_order_relaxed);
             g_aerNextEye.store(0, std::memory_order_relaxed);
             g_aerRenderedEye.store(0, std::memory_order_relaxed);
             g_aerMatrixTouched.store(false, std::memory_order_relaxed);
@@ -474,16 +474,15 @@ DWORD WINAPI tracking_thread(void *) {
             lastPreviewError.clear();
             lastCompositorError.clear();
             log_message(enabled
-                            ? "Experimental AER enabled: alternating cached camera eye offset; F11 swaps eyes"
+                            ? "Experimental AER enabled: alternating matrix[12] eye translation; F11 swaps compositor eyes"
                             : "Experimental AER disabled; headset preview remains mono");
         }
 
         if (key_pressed(VK_F11, f11WasDown) && g_aerEnabled.load(std::memory_order_relaxed)) {
             const bool swapped = !g_aerSwapEyes.load(std::memory_order_relaxed);
             g_aerSwapEyes.store(swapped, std::memory_order_relaxed);
-            fh2vr::shutdown_headset_preview();
-            log_message(swapped ? "AER retained eye assignment swapped"
-                                : "AER retained eye assignment restored");
+            log_message(swapped ? "AER compositor eye submission swapped"
+                                : "AER compositor eye submission restored");
         }
 
         if (g_mockMode.load(std::memory_order_relaxed)) {
@@ -570,12 +569,10 @@ DWORD WINAPI tracking_thread(void *) {
             std::string previewError;
             const bool aer = g_aerEnabled.load(std::memory_order_relaxed) &&
                              g_eyeOffsetsValid.load(std::memory_order_acquire);
-            int sourceEye = g_aerRenderedEye.load(std::memory_order_acquire) & 1;
-            if (g_aerSwapEyes.load(std::memory_order_relaxed)) {
-                sourceEye ^= 1;
-            }
+            const int sourceEye = g_aerRenderedEye.load(std::memory_order_acquire) & 1;
+            const bool swapEyes = g_aerSwapEyes.load(std::memory_order_relaxed);
 
-            if (!fh2vr::submit_headset_preview(compositor, aer, sourceEye, previewError)) {
+            if (!fh2vr::submit_headset_preview(compositor, aer, sourceEye, swapEyes, previewError)) {
                 if (previewError != lastPreviewError) {
                     log_message("Headset preview: " + previewError);
                     lastPreviewError = previewError;
@@ -677,7 +674,7 @@ extern "C" __declspec(dllexport) int FH2ML_Initialize(const FH2ML_HostAPI *api) 
     }
     CloseHandle(thread);
 
-    log_message("FH2VR 0.3.0-dev initialized: F6 mock, F7 toggle, F8 recenter, F9 preview, F10 AER, F11 swap");
+    log_message("FH2VR 0.3.1-dev initialized: F6 mock, F7 toggle, F8 recenter, F9 preview, F10 AER, F11 swap");
     return 1;
 }
 

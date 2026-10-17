@@ -280,7 +280,7 @@ std::string compositor_error(const char *eye, vr::EVRCompositorError result) {
 } // namespace
 
 bool submit_headset_preview(vr::IVRCompositor *compositor, bool alternatingEyes, int sourceEye,
-                            std::string &error) {
+                            bool swapEyes, std::string &error) {
     if (!compositor) {
         error = "OpenVR compositor is unavailable";
         return false;
@@ -310,6 +310,9 @@ bool submit_headset_preview(vr::IVRCompositor *compositor, bool alternatingEyes,
         }
         if (!g_preview.eyeHasFrame[1] && g_preview.eyeHasFrame[0]) {
             rightTexture = g_preview.eyeTextures[0].Get();
+        }
+        if (swapEyes) {
+            std::swap(leftTexture, rightTexture);
         }
     }
 
