@@ -113,7 +113,8 @@ SteamVR / Quest 3
 2. Start FH2 and enter Driver/cockpit view.
 3. Press **F9** only.
 4. Check whether the cross-eye effect is smaller, unchanged or worse.
-5. Exit and inspect `FH2VR_RendererProbe.log`.
+5. Leave it running for a few seconds so at least one `Driver FOV diagnostic` line is recorded.
+6. Exit and inspect `FH2VR_RendererProbe.log`.
 
 Useful lines are the M4 projection log and the Driver FOV diagnostic. Together they show the HMD-required frustum and the game's current camera FOV.
 
