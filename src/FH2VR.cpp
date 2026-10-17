@@ -8,12 +8,13 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <string>
 
 namespace {
 constexpr char kModId[] = "fh2vr";
-constexpr char kVersion[] = "0.3.1-dev";
+constexpr char kVersion[] = "0.3.2-dev";
 
 // Forza Horizon 2 Xbox One 1.0.0.64 camera layout, confirmed against the
 // camera hooks used by ForzaHorizon2_ExtraOptions.
@@ -33,20 +34,32 @@ constexpr float kPi = 3.14159265358979323846f;
 constexpr float kPitchLimit = 1.39626340159546366154f; // 80 degrees
 constexpr float kMockYawSpeed = kPi / 2.0f;            // 90 degrees / second
 constexpr float kMockPitchSpeed = 1.30899693899574718269f; // 75 degrees / second
+constexpr float kAerDebugMultiplier = 15.0f;
 constexpr ULONGLONG kVrRetryMs = 2000;
+constexpr ULONGLONG kDiffLogIntervalMs = 1000;
 
 using CameraUpdate = void (*)(void *camera, float dt, unsigned char reset);
+
+struct AerTranslationState {
+    bool haveBase = false;
+    float lastBase = 0.0f;
+    float lastWritten = 0.0f;
+};
 
 const FH2ML_HostAPI *g_api = nullptr;
 uintptr_t g_gameBase = 0;
 CameraUpdate g_originalCameraUpdate = nullptr;
+AerTranslationState g_aerTranslation;
+
 std::atomic<bool> g_stop{false};
 std::atomic<bool> g_trackingEnabled{true};
 std::atomic<bool> g_mockMode{false};
 std::atomic<bool> g_previewEnabled{false};
 std::atomic<bool> g_aerEnabled{false};
 std::atomic<bool> g_aerSwapEyes{false};
+std::atomic<bool> g_aerDebugAmplify{false};
 std::atomic<bool> g_aerMatrixTouched{false};
+std::atomic<bool> g_aerMatrixDumpRequested{false};
 std::atomic<bool> g_eyeOffsetsValid{false};
 std::atomic<bool> g_poseValid{false};
 std::atomic<bool> g_recenterRequested{true};
@@ -165,6 +178,41 @@ float *resolve_cached_view_matrix() {
     return memory_readable(matrix, sizeof(float) * 16) ? matrix : nullptr;
 }
 
+void dump_cached_matrix(const float matrix[16]) {
+    char buffer[768]{};
+    const int length = std::snprintf(
+        buffer, sizeof(buffer),
+        "AER 0x260 matrix before eye offset:\n"
+        "%.5f %.5f %.5f %.5f\n"
+        "%.5f %.5f %.5f %.5f\n"
+        "%.5f %.5f %.5f %.5f\n"
+        "%.5f %.5f %.5f %.5f",
+        matrix[0], matrix[1], matrix[2], matrix[3],
+        matrix[4], matrix[5], matrix[6], matrix[7],
+        matrix[8], matrix[9], matrix[10], matrix[11],
+        matrix[12], matrix[13], matrix[14], matrix[15]);
+    if (length > 0) {
+        log_message(buffer);
+    }
+}
+
+float choose_aer_base_translation(float currentTranslation) {
+    if (!g_aerTranslation.haveBase) {
+        return currentTranslation;
+    }
+
+    // If the value in memory is still exactly what FH2VR wrote last time, FH2
+    // did not rebuild the cached matrix between eye updates. Reuse the previous
+    // unmodified base so eye offsets cannot accumulate or drift. Otherwise the
+    // game changed the matrix, so the new value becomes the fresh base.
+    const float tolerance =
+        0.00001f * std::max(1.0f, std::fabs(g_aerTranslation.lastWritten));
+    if (std::fabs(currentTranslation - g_aerTranslation.lastWritten) <= tolerance) {
+        return g_aerTranslation.lastBase;
+    }
+    return currentTranslation;
+}
+
 bool apply_aer_eye_offset(int eye) {
     if (!g_aerEnabled.load(std::memory_order_relaxed) ||
         !g_eyeOffsetsValid.load(std::memory_order_acquire)) {
@@ -181,12 +229,15 @@ bool apply_aer_eye_offset(int eye) {
         return false;
     }
 
-    // Extra Options confirms [2,6,10] is the third column/look direction. That
-    // layout matches the common DirectX row-vector view matrix convention:
-    // basis vectors are columns and view translation lives in [12,13,14].
-    // Moving the physical camera along its local right axis by eyeX changes only
-    // the X view-translation term by -eyeX. This is still a live FH2 hypothesis,
-    // but it is a substantially better fit than the old [3,7,11] probe.
+    if (g_aerMatrixDumpRequested.exchange(false, std::memory_order_acq_rel)) {
+        dump_cached_matrix(matrix);
+    }
+
+    // Extra Options confirms [2,6,10] is the third column/look direction. This
+    // matches the common DirectX row-vector view-matrix convention where view
+    // translation lives in [12,13,14]. For the diagnostic we change only local
+    // X translation. F12 multiplies the physical eye offset by 15 so a valid
+    // renderer-facing matrix should produce an unmistakable displacement.
     const float rightX = matrix[0];
     const float rightY = matrix[4];
     const float rightZ = matrix[8];
@@ -195,23 +246,36 @@ bool apply_aer_eye_offset(int eye) {
         return false;
     }
 
-    const float eyeX = eye == 0 ? g_leftEyeX.load(std::memory_order_relaxed)
-                                : g_rightEyeX.load(std::memory_order_relaxed);
-    if (!std::isfinite(eyeX) || std::fabs(eyeX) > 0.15f) {
+    const float rawEyeX = eye == 0 ? g_leftEyeX.load(std::memory_order_relaxed)
+                                   : g_rightEyeX.load(std::memory_order_relaxed);
+    if (!std::isfinite(rawEyeX) || std::fabs(rawEyeX) > 0.15f) {
         return false;
     }
 
-    const float translationBefore = matrix[12];
-    matrix[12] -= eyeX;
+    const bool amplified = g_aerDebugAmplify.load(std::memory_order_relaxed);
+    const float multiplier = amplified ? kAerDebugMultiplier : 1.0f;
+    const float eyeX = rawEyeX * multiplier;
+    const float currentTranslation = matrix[12];
+    const float baseTranslation = choose_aer_base_translation(currentTranslation);
+    const float writtenTranslation = baseTranslation - eyeX;
+    matrix[12] = writtenTranslation;
 
     if (!write_memory(matrixAddress, matrix, sizeof(matrix))) {
         return false;
     }
 
+    g_aerTranslation.haveBase = true;
+    g_aerTranslation.lastBase = baseTranslation;
+    g_aerTranslation.lastWritten = writtenTranslation;
+
     if (!g_aerMatrixTouched.exchange(true, std::memory_order_acq_rel)) {
-        log_message("AER probe reached cached FH2 view matrix at camera+0x260; matrix[12] " +
-                    std::to_string(translationBefore) + " -> " + std::to_string(matrix[12]) +
-                    " for " + (eye == 0 ? std::string("left") : std::string("right")) + " eye");
+        log_message("AER cached matrix write: eye=" +
+                    std::string(eye == 0 ? "left" : "right") +
+                    " eyeX=" + std::to_string(rawEyeX) +
+                    " multiplier=" + std::to_string(multiplier) +
+                    " current=" + std::to_string(currentTranslation) +
+                    " base=" + std::to_string(baseTranslation) +
+                    " written=" + std::to_string(writtenTranslation));
     }
     return true;
 }
@@ -371,12 +435,14 @@ DWORD WINAPI tracking_thread(void *) {
     bool f9WasDown = false;
     bool f10WasDown = false;
     bool f11WasDown = false;
+    bool f12WasDown = false;
     std::string lastInitError;
     std::string lastPreviewError;
     std::string lastCompositorError;
     vr::IVRSystem *system = nullptr;
     vr::IVRCompositor *compositor = nullptr;
     ULONGLONG nextVrRetryAt = 0;
+    ULONGLONG nextDiffLogAt = 0;
     ULONGLONG previousTick = GetTickCount64();
     float referenceYaw = 0.0f;
     float referencePitch = 0.0f;
@@ -405,6 +471,7 @@ DWORD WINAPI tracking_thread(void *) {
 
             if (mock) {
                 g_aerEnabled.store(false, std::memory_order_relaxed);
+                g_aerDebugAmplify.store(false, std::memory_order_relaxed);
                 shutdown_runtime();
                 hasReference = false;
                 reset_mock_pose();
@@ -444,12 +511,14 @@ DWORD WINAPI tracking_thread(void *) {
             g_previewEnabled.store(enabled, std::memory_order_relaxed);
             if (!enabled) {
                 g_aerEnabled.store(false, std::memory_order_relaxed);
+                g_aerDebugAmplify.store(false, std::memory_order_relaxed);
             }
             g_poseValid.store(false, std::memory_order_release);
             shutdown_runtime();
             hasReference = false;
             g_recenterRequested.store(true, std::memory_order_relaxed);
             nextVrRetryAt = 0;
+            nextDiffLogAt = 0;
             lastPreviewError.clear();
             lastCompositorError.clear();
             log_message(enabled ? "Experimental headset preview enabled; restarting OpenVR as a scene app"
@@ -460,9 +529,11 @@ DWORD WINAPI tracking_thread(void *) {
             const bool enabled = !g_aerEnabled.load(std::memory_order_relaxed);
             g_aerEnabled.store(enabled, std::memory_order_relaxed);
             g_aerSwapEyes.store(false, std::memory_order_relaxed);
+            g_aerDebugAmplify.store(false, std::memory_order_relaxed);
             g_aerNextEye.store(0, std::memory_order_relaxed);
             g_aerRenderedEye.store(0, std::memory_order_relaxed);
             g_aerMatrixTouched.store(false, std::memory_order_relaxed);
+            g_aerMatrixDumpRequested.store(enabled, std::memory_order_relaxed);
             if (enabled) {
                 g_previewEnabled.store(true, std::memory_order_relaxed);
             }
@@ -471,10 +542,11 @@ DWORD WINAPI tracking_thread(void *) {
             hasReference = false;
             g_recenterRequested.store(true, std::memory_order_relaxed);
             nextVrRetryAt = 0;
+            nextDiffLogAt = 0;
             lastPreviewError.clear();
             lastCompositorError.clear();
             log_message(enabled
-                            ? "Experimental AER enabled: alternating matrix[12] eye translation; F11 swaps compositor eyes"
+                            ? "Experimental AER enabled: normal IPD; F11 swaps compositor eyes, F12 toggles x15 diagnostic"
                             : "Experimental AER disabled; headset preview remains mono");
         }
 
@@ -483,6 +555,17 @@ DWORD WINAPI tracking_thread(void *) {
             g_aerSwapEyes.store(swapped, std::memory_order_relaxed);
             log_message(swapped ? "AER compositor eye submission swapped"
                                 : "AER compositor eye submission restored");
+        }
+
+        if (key_pressed(VK_F12, f12WasDown) && g_aerEnabled.load(std::memory_order_relaxed)) {
+            const bool amplified = !g_aerDebugAmplify.load(std::memory_order_relaxed);
+            g_aerDebugAmplify.store(amplified, std::memory_order_relaxed);
+            g_aerMatrixTouched.store(false, std::memory_order_relaxed);
+            g_aerMatrixDumpRequested.store(true, std::memory_order_relaxed);
+            nextDiffLogAt = 0;
+            log_message(amplified
+                            ? "AER x15 diagnostic ENABLED: eye translation is intentionally exaggerated"
+                            : "AER x15 diagnostic disabled: restored real OpenVR eye translation");
         }
 
         if (g_mockMode.load(std::memory_order_relaxed)) {
@@ -519,7 +602,7 @@ DWORD WINAPI tracking_thread(void *) {
                         hasReference = false;
                         g_recenterRequested.store(true, std::memory_order_relaxed);
                         log_message(preview
-                                        ? "SteamVR scene/compositor connected; F9 preview, F10 AER, F11 swap eyes"
+                                        ? "SteamVR scene/compositor connected; F9 preview, F10 AER, F11 swap, F12 x15 diagnostic"
                                         : "SteamVR/OpenVR tracking connected; F6 mock, F7 toggle, F8 recenter, F9 preview");
                     }
                 }
@@ -577,9 +660,22 @@ DWORD WINAPI tracking_thread(void *) {
                     log_message("Headset preview: " + previewError);
                     lastPreviewError = previewError;
                 }
-            } else if (!lastPreviewError.empty()) {
-                log_message("Headset preview recovered");
-                lastPreviewError.clear();
+            } else {
+                if (!lastPreviewError.empty()) {
+                    log_message("Headset preview recovered");
+                    lastPreviewError.clear();
+                }
+
+                if (aer && now >= nextDiffLogAt) {
+                    double meanDiff = 0.0;
+                    if (fh2vr::get_headset_preview_mean_diff(meanDiff)) {
+                        log_message("AER L/R mean RGB diff = " + std::to_string(meanDiff) +
+                                    (g_aerDebugAmplify.load(std::memory_order_relaxed)
+                                         ? " (F12 x15)"
+                                         : " (normal IPD)"));
+                        nextDiffLogAt = now + kDiffLogIntervalMs;
+                    }
+                }
             }
         } else {
             Sleep(4);
@@ -674,7 +770,7 @@ extern "C" __declspec(dllexport) int FH2ML_Initialize(const FH2ML_HostAPI *api) 
     }
     CloseHandle(thread);
 
-    log_message("FH2VR 0.3.1-dev initialized: F6 mock, F7 toggle, F8 recenter, F9 preview, F10 AER, F11 swap");
+    log_message("FH2VR 0.3.2-dev initialized: F6 mock, F7 toggle, F8 recenter, F9 preview, F10 AER, F11 swap, F12 x15 diagnostic");
     return 1;
 }
 

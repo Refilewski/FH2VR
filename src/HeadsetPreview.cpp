@@ -8,18 +8,21 @@
 #include <cstdint>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace fh2vr {
 namespace {
 using Microsoft::WRL::ComPtr;
 
 constexpr ULONGLONG kCaptureIntervalMs = 16; // ~60 FPS max for the temporary GDI path.
+constexpr int kDiagnosticSampleStride = 16;
 
 struct PreviewState {
     ComPtr<ID3D11Device> device;
     ComPtr<ID3D11DeviceContext> context;
     std::array<ComPtr<ID3D11Texture2D>, 2> eyeTextures;
     std::array<bool, 2> eyeHasFrame{false, false};
+    std::array<std::vector<std::uint8_t>, 2> eyeSamples;
     HDC memoryDc = nullptr;
     HBITMAP bitmap = nullptr;
     HGDIOBJ previousBitmap = nullptr;
@@ -79,6 +82,9 @@ void release_capture_resources() {
         texture.Reset();
     }
     g_preview.eyeHasFrame = {false, false};
+    for (auto &samples : g_preview.eyeSamples) {
+        samples.clear();
+    }
 
     if (g_preview.memoryDc && g_preview.previousBitmap) {
         SelectObject(g_preview.memoryDc, g_preview.previousBitmap);
@@ -186,6 +192,27 @@ bool ensure_capture_resources(int width, int height, std::string &error) {
     return true;
 }
 
+void sample_capture_for_diagnostics(int eyeIndex, int width, int height) {
+    auto &samples = g_preview.eyeSamples[eyeIndex];
+    samples.clear();
+
+    const int sampleColumns = (width + kDiagnosticSampleStride - 1) / kDiagnosticSampleStride;
+    const int sampleRows = (height + kDiagnosticSampleStride - 1) / kDiagnosticSampleStride;
+    samples.reserve(static_cast<size_t>(sampleColumns) * static_cast<size_t>(sampleRows) * 3U);
+
+    const auto *pixels = static_cast<const std::uint8_t *>(g_preview.pixels);
+    for (int y = 0; y < height; y += kDiagnosticSampleStride) {
+        for (int x = 0; x < width; x += kDiagnosticSampleStride) {
+            const size_t offset =
+                (static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x)) * 4U;
+            const std::uint8_t *pixel = pixels + offset;
+            samples.push_back(pixel[0]); // B
+            samples.push_back(pixel[1]); // G
+            samples.push_back(pixel[2]); // R
+        }
+    }
+}
+
 bool capture_game_client(int eyeIndex, std::string &error) {
     if (eyeIndex < 0 || eyeIndex > 1) {
         error = "invalid eye index";
@@ -233,8 +260,10 @@ bool capture_game_client(int eyeIndex, std::string &error) {
         return false;
     }
 
+    sample_capture_for_diagnostics(eyeIndex, width, height);
     g_preview.context->UpdateSubresource(g_preview.eyeTextures[eyeIndex].Get(), 0, nullptr,
                                          g_preview.pixels, static_cast<UINT>(width * 4), 0);
+    g_preview.context->Flush();
     g_preview.eyeHasFrame[eyeIndex] = true;
     return true;
 }
@@ -335,6 +364,27 @@ bool submit_headset_preview(vr::IVRCompositor *compositor, bool alternatingEyes,
 
     compositor->PostPresentHandoff();
     error.clear();
+    return true;
+}
+
+bool get_headset_preview_mean_diff(double &meanDiff) {
+    if (!g_preview.eyeHasFrame[0] || !g_preview.eyeHasFrame[1]) {
+        return false;
+    }
+
+    const auto &left = g_preview.eyeSamples[0];
+    const auto &right = g_preview.eyeSamples[1];
+    if (left.empty() || left.size() != right.size()) {
+        return false;
+    }
+
+    std::uint64_t differenceSum = 0;
+    for (size_t index = 0; index < left.size(); ++index) {
+        const int delta = static_cast<int>(left[index]) - static_cast<int>(right[index]);
+        differenceSum += static_cast<std::uint64_t>(delta < 0 ? -delta : delta);
+    }
+
+    meanDiff = static_cast<double>(differenceSum) / static_cast<double>(left.size());
     return true;
 }
 
