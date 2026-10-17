@@ -2,9 +2,7 @@
 // The scene is still mono, so this is a conservative 6DoF approximation:
 // headset translation shifts/scales the source frustum instead of pretending
 // to be true depth reprojection or geometric stereo.
-#define submit_direct_d3d12_mono_preview submit_direct_d3d12_mono_preview_m9
 #include "RendererM9.cpp"
-#undef submit_direct_d3d12_mono_preview
 
 namespace {
 
@@ -75,7 +73,6 @@ void apply_head_position_parallax_m10(ProjectionM9 &projection,
     const float dy = pose.m[1][3] - reference.m[1][3];
     const float dz = pose.m[2][3] - reference.m[2][3];
 
-    // Convert tracking-space translation into the recentered headset basis.
     const float localX = std::clamp(
         dx * reference.m[0][0] + dy * reference.m[1][0] + dz * reference.m[2][0],
         -kMaxHorizontalMeters, kMaxHorizontalMeters);
@@ -92,9 +89,6 @@ void apply_head_position_parallax_m10(ProjectionM9 &projection,
         return;
     }
 
-    // Moving the head right/up should move the virtual world left/down.
-    // Sampling farther right/up from the source produces that screen-space
-    // response. Z translation adds a restrained zoom around source center.
     const float uShift =
         localX / (2.0f * kVirtualPlaneMeters * projection.sourceTanHalfX);
     const float vShift =
@@ -183,8 +177,8 @@ bool submit_scene_m10(vr::IVRCompositor *compositor,
 
 namespace fh2vr {
 
-bool submit_direct_d3d12_mono_preview(vr::IVRCompositor *compositor,
-                                      std::string &error) {
+bool submit_direct_d3d12_mono_preview_m10(vr::IVRCompositor *compositor,
+                                          std::string &error) {
     if (!compositor) {
         error = "OpenVR compositor unavailable";
         return false;
