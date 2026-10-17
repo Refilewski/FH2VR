@@ -15,4 +15,10 @@
     <DebugType>none</DebugType>
     <DebugSymbols>false</DebugSymbols>
   </PropertyGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Embedded/FH2VR.dll"
+                      LogicalName="FH2VR.EmbeddedRuntime"
+                      Condition="Exists('Embedded/FH2VR.dll')" />
+  </ItemGroup>
 </Project>
