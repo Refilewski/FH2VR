@@ -5,24 +5,22 @@ namespace fh2vr {
 
 bool submit_headset_preview(vr::IVRCompositor *compositor, bool alternatingEyes, int sourceEye,
                             bool swapEyes, std::string &error) {
-    // M2 intentionally disables the old GDI/BitBlt preview path. The newest
-    // retained D3D12 backbuffer frame is submitted as the same mono image to
-    // both eyes while we validate native D3D12 -> OpenVR and compositor pose
-    // reprojection. AER/sourceEye/swapEyes are ignored in this milestone.
+    // The current path is mono scene rendering with M10 projection/FOV,
+    // roll-neutral pose, positional HMD parallax and the layered GUI path.
+    // Legacy AER/sourceEye/swapEyes inputs are intentionally ignored.
     (void)alternatingEyes;
     (void)sourceEye;
     (void)swapEyes;
-    return submit_direct_d3d12_mono_preview(compositor, error);
+    return submit_direct_d3d12_mono_preview_m10(compositor, error);
 }
 
 bool get_headset_preview_mean_diff(double &meanDiff) {
-    // M2 is deliberately mono and no longer maintains CPU/GDI image samples.
     meanDiff = 0.0;
     return false;
 }
 
 void shutdown_headset_preview() {
-    // Renderer-owned D3D12 resources live for the process lifetime in M2.
+    // Renderer-owned D3D12 resources live for the process lifetime.
 }
 
 } // namespace fh2vr
