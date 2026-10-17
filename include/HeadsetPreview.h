@@ -6,16 +6,14 @@
 
 namespace fh2vr {
 
-// Captures the latest visible FH2 frame. In mono mode the same texture is sent
-// to both eyes. In alternating-eye mode the frame is stored for sourceEye and
-// the latest retained left/right textures are submitted together. swapEyes
-// swaps only the final compositor assignment, making F11 a real L/R diagnostic.
+// M2 headset preview entry point. The implementation now routes the newest
+// retained native D3D12 backbuffer frame to both eyes through OpenVR DirectX12
+// with Submit_TextureWithPose. The legacy parameters remain temporarily so the
+// tracking/control code does not need to change while AER is retired.
 bool submit_headset_preview(vr::IVRCompositor *compositor, bool alternatingEyes, int sourceEye,
                             bool swapEyes, std::string &error);
 
-// Returns the mean absolute RGB difference between small CPU-side samples of
-// the latest retained left/right captures. Intended only as a diagnostic: with
-// motion, temporal differences can raise this value even without stereo.
+// Legacy GDI/AER diagnostic sampling is disabled in M2.
 bool get_headset_preview_mean_diff(double &meanDiff);
 
 void shutdown_headset_preview();
