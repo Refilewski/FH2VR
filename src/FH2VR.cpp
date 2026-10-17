@@ -162,8 +162,10 @@ void publish_pose(const vr::HmdMatrix34_t &matrix, float &referenceYaw, float &r
         log_message("Head pose recentered");
     }
 
-    g_yaw.store(wrap_angle(yaw - referenceYaw), std::memory_order_relaxed);
-    g_pitch.store(std::clamp(pitch - referencePitch, -kPitchLimit, kPitchLimit),
+    // FH2's mounted-camera convention is opposite to the OpenVR deltas observed
+    // on real HMD hardware, so invert only the live HMD path and leave mock input unchanged.
+    g_yaw.store(wrap_angle(referenceYaw - yaw), std::memory_order_relaxed);
+    g_pitch.store(std::clamp(referencePitch - pitch, -kPitchLimit, kPitchLimit),
                   std::memory_order_relaxed);
     g_poseValid.store(g_trackingEnabled.load(std::memory_order_relaxed), std::memory_order_release);
 }
