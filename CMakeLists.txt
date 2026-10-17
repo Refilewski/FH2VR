@@ -32,7 +32,7 @@ FetchContent_MakeAvailable(minhook)
 add_library(FH2VR SHARED
   src/FH2VR.cpp
   src/HeadsetPreview.cpp
-  src/RendererM6.cpp
+  src/RendererM7.cpp
   src/FovMatch.cpp
 )
 target_include_directories(FH2VR PRIVATE include)
