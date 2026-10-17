@@ -1,9 +1,10 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Drawing;
+using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
-using System.Text.Json;
 using System.Threading;
 using System.Windows.Forms;
 
@@ -27,7 +28,8 @@ internal static class Program
 
         try
         {
-            using var context = new TrayApplicationContext(log);
+            string runtimePath = EmbeddedRuntime.EnsureExtracted(log);
+            using var context = new TrayApplicationContext(log, runtimePath);
             Application.Run(context);
         }
         catch (Exception ex)
@@ -42,14 +44,69 @@ internal static class Program
     }
 }
 
+internal static class EmbeddedRuntime
+{
+    private const string ResourceName = "FH2VR.EmbeddedRuntime";
+
+    internal static string EnsureExtracted(FileLog log)
+    {
+        Assembly assembly = Assembly.GetExecutingAssembly();
+        using Stream stream = assembly.GetManifestResourceStream(ResourceName)
+                              ?? throw new InvalidOperationException(
+                                  "Embedded FH2VR runtime is missing from this build.");
+        using var memory = new MemoryStream();
+        stream.CopyTo(memory);
+        byte[] payload = memory.ToArray();
+        if (payload.Length == 0)
+            throw new InvalidOperationException("Embedded FH2VR runtime is empty.");
+
+        string hash = Convert.ToHexString(SHA256.HashData(payload)).ToLowerInvariant();
+        string directory = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "FH2VR", "runtime", hash);
+        string path = Path.Combine(directory, "FH2VR.dll");
+
+        Directory.CreateDirectory(directory);
+
+        if (File.Exists(path))
+        {
+            using FileStream existing = File.OpenRead(path);
+            string existingHash = Convert.ToHexString(SHA256.HashData(existing)).ToLowerInvariant();
+            if (existingHash == hash)
+            {
+                log.Write($"Using extracted runtime {hash[..12]} at {path}");
+                return path;
+            }
+        }
+
+        string staged = path + ".new-" + Guid.NewGuid().ToString("N");
+        try
+        {
+            File.WriteAllBytes(staged, payload);
+            using FileStream written = File.OpenRead(staged);
+            string writtenHash = Convert.ToHexString(SHA256.HashData(written)).ToLowerInvariant();
+            if (writtenHash != hash)
+                throw new InvalidOperationException("Extracted FH2VR runtime failed SHA-256 verification.");
+
+            File.Move(staged, path, overwrite: true);
+        }
+        finally
+        {
+            if (File.Exists(staged))
+                File.Delete(staged);
+        }
+
+        log.Write($"Extracted embedded runtime {hash[..12]} to {path}");
+        return path;
+    }
+}
+
 internal sealed class TrayApplicationContext : ApplicationContext
 {
     private readonly FileLog _log;
-    private readonly LauncherSettings _settings;
+    private readonly string _runtimePath;
     private readonly NotifyIcon _tray;
     private readonly ToolStripMenuItem _status;
-    private readonly ToolStripMenuItem _attach;
-    private readonly ToolStripMenuItem _launch;
     private readonly System.Windows.Forms.Timer _timer;
 
     private int? _attachedPid;
@@ -57,10 +114,10 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private DateTime _nextAttemptUtc = DateTime.MinValue;
     private int _exiting;
 
-    internal TrayApplicationContext(FileLog log)
+    internal TrayApplicationContext(FileLog log, string runtimePath)
     {
         _log = log;
-        _settings = LauncherSettings.Load(log);
+        _runtimePath = runtimePath;
 
         Icon icon = Icon.ExtractAssociatedIcon(Environment.ProcessPath ?? string.Empty)
                     ?? SystemIcons.Application;
@@ -70,13 +127,6 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _status = new ToolStripMenuItem("Waiting for Azimuth...") { Enabled = false };
         menu.Items.Add(_status);
         menu.Items.Add(new ToolStripSeparator());
-        _attach = new ToolStripMenuItem("Attach now", null, (_, _) => AttachNow(showErrors: true));
-        _launch = new ToolStripMenuItem("Launch Azimuth", null, (_, _) => LaunchAzimuth());
-        menu.Items.Add(_attach);
-        menu.Items.Add(_launch);
-        menu.Items.Add("Select Azimuth folder...", null, (_, _) => SelectAzimuthFolder());
-        menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add("Open FH2VR logs", null, (_, _) => OpenLogs());
         menu.Items.Add("Exit", null, (_, _) => Exit());
 
         _tray = new NotifyIcon
@@ -86,7 +136,6 @@ internal sealed class TrayApplicationContext : ApplicationContext
             Visible = true,
             ContextMenuStrip = menu
         };
-        _tray.DoubleClick += (_, _) => AttachNow(showErrors: true);
 
         _timer = new System.Windows.Forms.Timer { Interval = 1000 };
         _timer.Tick += (_, _) => Tick();
@@ -94,9 +143,6 @@ internal sealed class TrayApplicationContext : ApplicationContext
 
         Tick();
     }
-
-    private string RuntimePath
-        => Path.Combine(AppContext.BaseDirectory, "Payload", "FH2VR.dll");
 
     private void Tick()
     {
@@ -106,15 +152,12 @@ internal sealed class TrayApplicationContext : ApplicationContext
             _attachedPid = null;
             _lastAttemptPid = null;
             _status.Text = "Waiting for azimuth.exe";
-            _attach.Enabled = false;
             SetTrayText("FH2VR — waiting for Azimuth");
             return;
         }
 
         using (process)
         {
-            _attach.Enabled = true;
-
             if (_attachedPid == process.Id)
             {
                 _status.Text = $"Attached · PID {process.Id} · F1 VR / F2 GUI";
@@ -125,7 +168,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             if (RemoteRuntime.IsModuleLoaded(process.Id, "FH2VR.dll"))
             {
                 _attachedPid = process.Id;
-                _status.Text = $"FH2VR already loaded · PID {process.Id}";
+                _status.Text = $"FH2VR loaded · PID {process.Id}";
                 SetTrayText("FH2VR — runtime loaded");
                 return;
             }
@@ -133,42 +176,21 @@ internal sealed class TrayApplicationContext : ApplicationContext
             _status.Text = $"Azimuth detected · PID {process.Id} · attaching...";
             SetTrayText("FH2VR — attaching");
 
-            if ((_lastAttemptPid != process.Id || DateTime.UtcNow >= _nextAttemptUtc) &&
-                File.Exists(RuntimePath))
+            if (_lastAttemptPid != process.Id || DateTime.UtcNow >= _nextAttemptUtc)
             {
                 _lastAttemptPid = process.Id;
                 _nextAttemptUtc = DateTime.UtcNow.AddSeconds(5);
-                TryAttach(process, showErrors: false);
-            }
-            else if (!File.Exists(RuntimePath))
-            {
-                _status.Text = "Payload/FH2VR.dll is missing";
-                SetTrayText("FH2VR — runtime missing");
+                TryAttach(process);
             }
         }
     }
 
-    private void AttachNow(bool showErrors)
-    {
-        Process? process = FindNewestAzimuth();
-        if (process is null)
-        {
-            if (showErrors)
-                MessageBox.Show("azimuth.exe is not running.", "FH2VR",
-                                MessageBoxButtons.OK, MessageBoxIcon.Information);
-            return;
-        }
-
-        using (process)
-            TryAttach(process, showErrors);
-    }
-
-    private void TryAttach(Process process, bool showErrors)
+    private void TryAttach(Process process)
     {
         try
         {
-            if (!File.Exists(RuntimePath))
-                throw new FileNotFoundException("Standalone runtime is missing from Payload/FH2VR.dll.", RuntimePath);
+            if (!File.Exists(_runtimePath))
+                throw new FileNotFoundException("Extracted FH2VR runtime is missing.", _runtimePath);
 
             if (RemoteRuntime.IsModuleLoaded(process.Id, "FH2VR.dll"))
             {
@@ -178,7 +200,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             }
 
             _log.Write($"Attaching FH2VR runtime to azimuth PID {process.Id}");
-            RemoteRuntime.LoadAndStart(process.Id, RuntimePath, "FH2VR_StandaloneInitialize");
+            RemoteRuntime.LoadAndStart(process.Id, _runtimePath, "FH2VR_StandaloneInitialize");
             _attachedPid = process.Id;
             _lastAttemptPid = process.Id;
             _status.Text = $"Attached · PID {process.Id} · F1 VR / F2 GUI";
@@ -186,94 +208,15 @@ internal sealed class TrayApplicationContext : ApplicationContext
             _log.Write($"Standalone runtime initialized in PID {process.Id}");
 
             _tray.BalloonTipTitle = "FH2VR attached";
-            _tray.BalloonTipText = "Press F1 for VR and F2 for the manual GUI/HUD overlay.";
-            _tray.ShowBalloonTip(2500);
+            _tray.BalloonTipText = "F1: VR · F2: GUI/HUD overlay";
+            _tray.ShowBalloonTip(1800);
         }
         catch (Exception ex)
         {
             _attachedPid = null;
-            _status.Text = "Attach failed · see logs";
-            SetTrayText("FH2VR — attach failed");
+            _status.Text = "Attach failed · retrying automatically";
+            SetTrayText("FH2VR — attach retry");
             _log.Write($"Attach to PID {process.Id} failed: {ex}");
-
-            if (showErrors)
-            {
-                MessageBox.Show(
-                    ex.Message + "\n\nIf Azimuth is running as administrator, run FH2VR with the same privilege level.",
-                    "FH2VR attach failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
-        }
-    }
-
-    private void SelectAzimuthFolder()
-    {
-        using var dialog = new FolderBrowserDialog
-        {
-            Description = "Select the folder containing azimuth.exe",
-            UseDescriptionForTitle = true,
-            ShowNewFolderButton = false,
-            InitialDirectory = _settings.AzimuthDirectory ?? string.Empty
-        };
-
-        if (dialog.ShowDialog() != DialogResult.OK)
-            return;
-
-        string selected = Path.GetFullPath(dialog.SelectedPath);
-        if (!File.Exists(Path.Combine(selected, "azimuth.exe")))
-        {
-            MessageBox.Show("That folder does not contain azimuth.exe.",
-                            "FH2VR", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            return;
-        }
-
-        _settings.AzimuthDirectory = selected;
-        _settings.Save(_log);
-        _log.Write($"Azimuth directory selected: {selected}");
-    }
-
-    private void LaunchAzimuth()
-    {
-        try
-        {
-            string? root = _settings.AzimuthDirectory;
-            if (string.IsNullOrWhiteSpace(root) || !File.Exists(Path.Combine(root, "azimuth.exe")))
-            {
-                SelectAzimuthFolder();
-                root = _settings.AzimuthDirectory;
-            }
-
-            if (string.IsNullOrWhiteSpace(root))
-                return;
-
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = Path.Combine(root, "azimuth.exe"),
-                WorkingDirectory = root,
-                UseShellExecute = true
-            });
-            _log.Write("Launched Azimuth; auto-attach will run when the process is ready");
-        }
-        catch (Exception ex)
-        {
-            _log.Write($"Launch failed: {ex.Message}");
-            MessageBox.Show(ex.Message, "FH2VR", MessageBoxButtons.OK, MessageBoxIcon.Error);
-        }
-    }
-
-    private void OpenLogs()
-    {
-        try
-        {
-            Directory.CreateDirectory(FileLog.LogDirectory);
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = FileLog.LogDirectory,
-                UseShellExecute = true
-            });
-        }
-        catch (Exception ex)
-        {
-            MessageBox.Show(ex.Message, "FH2VR", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
 
@@ -345,7 +288,6 @@ internal static class RemoteRuntime
     private const uint PageReadWrite = 0x04;
     private const uint WaitObject0 = 0x00000000;
     private const uint WaitTimeout = 0x00000102;
-    private const uint Infinite = 0xFFFFFFFF;
     private const uint Th32csSnapModule = 0x00000008;
     private const uint Th32csSnapModule32 = 0x00000010;
     private const uint DontResolveDllReferences = 0x00000001;
@@ -558,55 +500,6 @@ internal static class RemoteRuntime
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool FreeLibrary(IntPtr module);
-}
-
-internal sealed class LauncherSettings
-{
-    public string? AzimuthDirectory { get; set; }
-
-    internal static LauncherSettings Load(FileLog log)
-    {
-        try
-        {
-            if (File.Exists(SettingsPath))
-            {
-                return JsonSerializer.Deserialize<LauncherSettings>(File.ReadAllText(SettingsPath), JsonOptions.Pretty)
-                       ?? new LauncherSettings();
-            }
-        }
-        catch (Exception ex)
-        {
-            log.Write($"Could not load settings: {ex.Message}");
-        }
-
-        return new LauncherSettings();
-    }
-
-    internal void Save(FileLog log)
-    {
-        try
-        {
-            Directory.CreateDirectory(Path.GetDirectoryName(SettingsPath)!);
-            File.WriteAllText(SettingsPath, JsonSerializer.Serialize(this, JsonOptions.Pretty));
-        }
-        catch (Exception ex)
-        {
-            log.Write($"Could not save settings: {ex.Message}");
-        }
-    }
-
-    private static string SettingsPath =>
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                     "FH2VR", "settings.json");
-}
-
-internal static class JsonOptions
-{
-    internal static readonly JsonSerializerOptions Pretty = new()
-    {
-        WriteIndented = true,
-        PropertyNameCaseInsensitive = true
-    };
 }
 
 internal sealed class FileLog : IDisposable
