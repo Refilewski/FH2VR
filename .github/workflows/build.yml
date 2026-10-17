@@ -50,6 +50,12 @@ jobs:
             throw "Unexpected package contents. Actual: $($actual -join ', ')"
           }
 
+      - name: Stage standalone resource
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path 'standalone/Embedded' | Out-Null
+          Copy-Item 'build/Release/FH2VR.dll' 'standalone/Embedded/FH2VR.dll' -Force
+
       - name: Publish standalone app
         shell: pwsh
         run: |
@@ -67,11 +73,8 @@ jobs:
       - name: Package standalone build
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path 'standalone-package/Payload' | Out-Null
           New-Item -ItemType Directory -Force -Path 'standalone-package/licenses' | Out-Null
-
           Copy-Item 'standalone-publish/FH2VR.exe' 'standalone-package/FH2VR.exe'
-          Copy-Item 'build/Release/FH2VR.dll' 'standalone-package/Payload/FH2VR.dll'
           Copy-Item 'README.md' 'standalone-package/README.md'
           Copy-Item 'THIRD_PARTY.md' 'standalone-package/THIRD_PARTY.md'
           Copy-Item 'package/licenses/OpenVR-LICENSE.txt' 'standalone-package/licenses/OpenVR-LICENSE.txt'
@@ -82,7 +85,6 @@ jobs:
         run: |
           $expected = @(
             'FH2VR.exe',
-            'Payload/FH2VR.dll',
             'README.md',
             'THIRD_PARTY.md',
             'licenses/OpenVR-LICENSE.txt',
@@ -92,7 +94,6 @@ jobs:
           $actual = Get-ChildItem 'standalone-package' -File -Recurse | ForEach-Object {
             $_.FullName.Substring($root.Length + 1).Replace('\','/')
           } | Sort-Object
-
           if ($actual.Count -ne $expected.Count) {
             throw "Unexpected standalone package file count: $($actual.Count). Actual: $($actual -join ', ')"
           }
