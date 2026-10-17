@@ -37,7 +37,7 @@ add_library(FH2VR SHARED
   src/FovMatch.cpp
   src/UiModeDetector.cpp
   src/GameBaseLocator.cpp
-  src/CameraResearch.cpp
+  src/CameraResearchV2.cpp
   src/CameraResearchBootstrap.cpp
 )
 target_include_directories(FH2VR PRIVATE include)
