@@ -6,9 +6,12 @@
 
 namespace fh2vr {
 
-// Submits the newest retained FH2 D3D12 backbuffer copy to OpenVR. The active
-// renderer handles projection/FOV matching, reprojection and the GUI overlay.
+// M9 compatibility entrypoint retained inside RendererM10.cpp.
 bool submit_direct_d3d12_mono_preview(vr::IVRCompositor *compositor,
                                       std::string &error);
+
+// Active M10 path: M9 capture/UI plus positional HMD parallax.
+bool submit_direct_d3d12_mono_preview_m10(vr::IVRCompositor *compositor,
+                                          std::string &error);
 
 } // namespace fh2vr
