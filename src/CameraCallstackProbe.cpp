@@ -145,9 +145,10 @@ void camera_probe_hook(void *camera, float dt, unsigned char reset) {
     if (g_previous) {
         g_previous(camera, dt, reset);
     }
-    if (haveBefore) {
-        fh2vr::timeline_note_camera(before[0], before[1], before[2]);
-    }
+    fh2vr::timeline_note_camera(haveBefore,
+                                haveBefore ? before[0] : 0.0f,
+                                haveBefore ? before[1] : 0.0f,
+                                haveBefore ? before[2] : 0.0f);
 
     const ULONGLONG now = GetTickCount64();
     if (g_lastSampleAt != 0 && now - g_lastSampleAt < kSampleEveryMs) {
@@ -187,6 +188,7 @@ bool install_probe() {
     DWORD ignored = 0;
     VirtualProtect(slot, sizeof(*slot), oldProtection, &ignored);
     g_installed.store(true, std::memory_order_release);
+    fh2vr::timeline_note_probe_installed(true);
     return true;
 }
 
