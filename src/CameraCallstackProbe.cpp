@@ -1,4 +1,5 @@
 #include "GameBaseLocator.h"
+#include "CameraFrameTimeline.h"
 
 #include <windows.h>
 
@@ -143,6 +144,9 @@ void camera_probe_hook(void *camera, float dt, unsigned char reset) {
 
     if (g_previous) {
         g_previous(camera, dt, reset);
+    }
+    if (haveBefore) {
+        fh2vr::timeline_note_camera(before[0], before[1], before[2]);
     }
 
     const ULONGLONG now = GetTickCount64();
