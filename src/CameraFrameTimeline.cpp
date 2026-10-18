@@ -15,6 +15,8 @@ constexpr std::size_t kCapacity = 32768;
 constexpr DWORD kStartupDelayMs = 9000;
 constexpr DWORD kCaptureDurationMs = 22000;
 constexpr DWORD kWaitForCameraMs = 45000;
+constexpr ULONGLONG kCameraFreshWindowMs = 2000;
+constexpr ULONGLONG kCameraLastSeenLimitMs = 500;
 
 enum class Kind : std::uint8_t { Camera, Execute, Present };
 struct Event {
@@ -38,6 +40,7 @@ std::atomic<bool> g_capture{false};
 std::atomic<bool> g_probeInstalled{false};
 std::atomic<std::uint64_t> g_cameraCalls{0};
 std::atomic<std::uint64_t> g_cameraValidCalls{0};
+std::atomic<ULONGLONG> g_lastValidCameraAtMs{0};
 LONGLONG g_startQpc = 0;
 
 void record(Kind kind, unsigned argA, unsigned argB,
@@ -65,7 +68,7 @@ std::filesystem::path file_path() {
     const std::filesystem::path dir = root / L"FH2VR" / L"logs";
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);
-    return dir / L"FH2VR-FrameTimeline-M11.5.csv";
+    return dir / L"FH2VR-FrameTimeline-M11.6.csv";
 }
 
 const char *event_name(Kind kind) {
@@ -83,17 +86,40 @@ DWORD WINAPI timeline_writer(void *) {
     while (!fh2vr::find_fh2_game_base()) Sleep(500);
     Sleep(kStartupDelayMs);
 
-    // Do not silently measure a menu/loading screen instead of gameplay.
-    // Wait for actual Driver camera callbacks, but time out with diagnostics.
+    // A historical total of >=5 callbacks is not enough: M11.5 showed
+    // 135 callbacks before capture, then ZERO during the recording.
+    // Require a recent burst of valid callbacks after the startup delay.
     DWORD waitedForCamera = 0;
-    while (waitedForCamera < kWaitForCameraMs &&
-           g_cameraValidCalls.load(std::memory_order_acquire) < 5) {
+    ULONGLONG windowBeganAt = GetTickCount64();
+    std::uint64_t windowBaseline =
+        g_cameraValidCalls.load(std::memory_order_acquire);
+    bool cameraWasActive = false;
+    while (waitedForCamera < kWaitForCameraMs) {
         Sleep(100);
         waitedForCamera += 100;
+        const ULONGLONG now = GetTickCount64();
+        const std::uint64_t validCalls =
+            g_cameraValidCalls.load(std::memory_order_acquire);
+        const ULONGLONG lastValidAt =
+            g_lastValidCameraAtMs.load(std::memory_order_acquire);
+        if (validCalls >= windowBaseline + 5 && lastValidAt != 0 &&
+            now >= lastValidAt && now - lastValidAt <= kCameraLastSeenLimitMs) {
+            cameraWasActive = true;
+            break;
+        }
+        if (now - windowBeganAt >= kCameraFreshWindowMs) {
+            windowBaseline = validCalls;
+            windowBeganAt = now;
+        }
     }
-    const bool cameraWasActive =
-        g_cameraValidCalls.load(std::memory_order_acquire) >= 5;
-    if (cameraWasActive) Sleep(500);
+
+    const ULONGLONG captureStartTick = GetTickCount64();
+    const ULONGLONG lastValidBeforeCapture =
+        g_lastValidCameraAtMs.load(std::memory_order_acquire);
+    const std::uint64_t hooksBeforeCapture =
+        g_cameraCalls.load(std::memory_order_acquire);
+    const std::uint64_t validBeforeCapture =
+        g_cameraValidCalls.load(std::memory_order_acquire);
 
     LARGE_INTEGER frequency{}, start{};
     QueryPerformanceFrequency(&frequency);
@@ -102,13 +128,20 @@ DWORD WINAPI timeline_writer(void *) {
     g_capture.store(true, std::memory_order_release);
     Sleep(kCaptureDurationMs);
     g_capture.store(false, std::memory_order_release);
+    const ULONGLONG captureEndTick = GetTickCount64();
+    const std::uint64_t hooksAfterCapture =
+        g_cameraCalls.load(std::memory_order_acquire);
+    const std::uint64_t validAfterCapture =
+        g_cameraValidCalls.load(std::memory_order_acquire);
+    const ULONGLONG lastValidAfterCapture =
+        g_lastValidCameraAtMs.load(std::memory_order_acquire);
     Sleep(100); // Allow any producer that observed the old flag to finish.
 
     std::ofstream file(file_path(), std::ios::out | std::ios::trunc);
     if (!file) return 0;
     const std::uint32_t claimed = g_next.load(std::memory_order_acquire);
     const std::size_t count = claimed < kCapacity ? claimed : kCapacity;
-    file << "# FH2VR M11.5 post-update camera-aware frame timing capture, no VR required\n"
+    file << "# FH2VR M11.6 fresh-camera-gated frame timing capture, no VR required\n"
          << "# Passive timestamps from existing game camera and D3D12 hooks.\n"
          << "# camera-post-update = after Driver camera callback; "
             "game-direct-execute = non-mod DIRECT queue; "
@@ -119,6 +152,20 @@ DWORD WINAPI timeline_writer(void *) {
          << " probe_installed=" << (g_probeInstalled.load() ? "yes" : "no")
          << " camera_hook_calls=" << g_cameraCalls.load()
          << " camera_view_valid_calls=" << g_cameraValidCalls.load() << "\n"
+         << "# camera_fresh_window_ms=" << kCameraFreshWindowMs
+         << " camera_last_seen_limit_ms=" << kCameraLastSeenLimitMs
+         << " camera_last_valid_age_start_ms="
+         << (lastValidBeforeCapture && captureStartTick >= lastValidBeforeCapture
+                 ? static_cast<long long>(captureStartTick - lastValidBeforeCapture)
+                 : -1ll)
+         << " camera_last_valid_age_end_ms="
+         << (lastValidAfterCapture && captureEndTick >= lastValidAfterCapture
+                 ? static_cast<long long>(captureEndTick - lastValidAfterCapture)
+                 : -1ll) << "\n"
+         << "# camera_hooks_during_capture=" << (hooksAfterCapture - hooksBeforeCapture)
+         << " camera_valid_during_capture=" << (validAfterCapture - validBeforeCapture)
+         << " camera_hook_calls_before_capture=" << hooksBeforeCapture
+         << " camera_view_valid_calls_before_capture=" << validBeforeCapture << "\n"
          << "# camera-post-update arg_a: 1=post-update view matrix available, 0=unavailable.\n"
          << "# samples=" << count << " dropped="
          << (claimed > kCapacity ? claimed - kCapacity : 0)
@@ -160,7 +207,10 @@ void timeline_note_probe_installed(bool installed) {
 }
 void timeline_note_camera(bool valid, float x, float y, float z) {
     g_cameraCalls.fetch_add(1, std::memory_order_relaxed);
-    if (valid) g_cameraValidCalls.fetch_add(1, std::memory_order_release);
+    if (valid) {
+        g_lastValidCameraAtMs.store(GetTickCount64(), std::memory_order_release);
+        g_cameraValidCalls.fetch_add(1, std::memory_order_release);
+    }
     record(Kind::Camera, valid ? 1u : 0u, 0, x, y, z);
 }
 void timeline_note_execute(unsigned count) {
