@@ -140,8 +140,8 @@ void enqueue_sample(const Sample &sample) {
 }
 
 void camera_probe_hook(void *camera, float dt, unsigned char reset) {
-    // Only the infrequent call-stack sample needs a pre-update matrix. The
-    // frame timeline instead records the actual post-update matrix every time.
+    // M11.7 captures the matrix both before and after this callback.
+    // The matrix might be rebuilt elsewhere; this does not change camera state.
     const ULONGLONG now = GetTickCount64();
     ULONGLONG previousSampleAt = g_lastSampleAt.load(std::memory_order_relaxed);
     const bool sampleStack =
@@ -150,7 +150,11 @@ void camera_probe_hook(void *camera, float dt, unsigned char reset) {
             previousSampleAt, now, std::memory_order_relaxed);
 
     float before[3]{};
-    const bool haveBefore = sampleStack && read_translation(before);
+    const bool haveBefore = read_translation(before);
+    fh2vr::timeline_note_camera_before(haveBefore,
+                                       haveBefore ? before[0] : 0.0f,
+                                       haveBefore ? before[1] : 0.0f,
+                                       haveBefore ? before[2] : 0.0f);
 
     if (g_previous) {
         g_previous(camera, dt, reset);
@@ -298,6 +302,17 @@ Bootstrap g_bootstrap;
 } // namespace
 
 namespace fh2vr {
+bool camera_probe_read_cached_view(float &tx, float &ty, float &tz) {
+    float translation[3]{};
+    if (!read_translation(translation)) {
+        return false;
+    }
+    tx = translation[0];
+    ty = translation[1];
+    tz = translation[2];
+    return true;
+}
+
 int camera_probe_slot_state() {
     if (!g_installed.load(std::memory_order_acquire) || !g_gameBase) {
         return -1;
