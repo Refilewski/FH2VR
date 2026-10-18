@@ -139,6 +139,12 @@ def report(meta: dict[str, str], events: list[Event], max_frames: int = 10) -> s
         execute_counts = []
         phase_order = collections.Counter()
         phase_medians = {"execute3": [], "camera": [], "execute5": []}
+        matrix_pair_distances = {
+            "3-list -> camera-pre": [],
+            "camera-pre -> camera-post": [],
+            "camera-post -> 5-list": [],
+        }
+        out_of_order_matrix_phases = 0
         camera_to_present = []
         preview = []
         for previous, current in zip(presents, presents[1:]):
@@ -157,6 +163,17 @@ def report(meta: dict[str, str], events: list[Event], max_frames: int = 10) -> s
                 phase_medians["execute3"].append(execute3[0].time_us - previous.time_us)
                 phase_medians["camera"].append(frame_cameras[0].time_us - previous.time_us)
                 phase_medians["execute5"].append(execute5[0].time_us - previous.time_us)
+            frame_pre = [e for e in frame_events if e.name == "camera-pre-update" and e.arg_a == 1]
+            if (len(frame_pre) == len(frame_cameras) == len(execute3) == len(execute5) == 1
+                    and execute3[0].arg_b == 1 and execute5[0].arg_b == 1):
+                phases = [execute3[0], frame_pre[0], frame_cameras[0], execute5[0]]
+                if all(a.time_us <= b.time_us for a, b in zip(phases, phases[1:])):
+                    for label, a, b in zip(matrix_pair_distances, phases, phases[1:]):
+                        delta = ((a.tx - b.tx) ** 2 + (a.ty - b.ty) ** 2 +
+                                 (a.tz - b.tz) ** 2) ** 0.5
+                        matrix_pair_distances[label].append(delta)
+                else:
+                    out_of_order_matrix_phases += 1
             camera_counts.append(len(frame_cameras))
             execute_counts.append(len(frame_executes))
             lag = current.time_us - frame_cameras[-1].time_us if frame_cameras else None
@@ -187,6 +204,18 @@ def report(meta: dict[str, str], events: list[Event], max_frames: int = 10) -> s
                                       for phase, values in phase_medians.items()))
             for pattern, count in phase_order.most_common(3):
                 output.append(f"CPU phase order {' -> '.join(pattern)}: {count}/{len(camera_counts)}")
+        pair_count = len(matrix_pair_distances["camera-pre -> camera-post"])
+        if pre_cameras:
+            output.append(f"M11.7 matrix phases: complete ordered 3/pre/post/5 frames="
+                          f"{pair_count}/{len(camera_counts)}; out-of-order={out_of_order_matrix_phases}")
+            if pair_count:
+                for phase, distances in matrix_pair_distances.items():
+                    changes = sum(delta > 0.01 for delta in distances)
+                    output.append(f"  cached view translation {phase}: changed >0.01 in "
+                                  f"{changes}/{len(distances)}; median delta="
+                                  f"{statistics.median(distances):.5f}")
+                output.append("Matrix translation changes reveal CPU sampling intervals only; "
+                              "the GPU world-pass boundary is still unverified.")
         output.append("First frame intervals:")
         output.extend(preview)
     if warnings:
