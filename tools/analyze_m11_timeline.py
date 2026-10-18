@@ -72,7 +72,7 @@ def report(meta: dict[str, str], events: list[Event], max_frames: int = 10) -> s
     executes = [e for e in events if e.name == "game-direct-execute"]
     presents = [e for e in events if e.name == "game-present"]
     output = [
-        "FH2VR M11.4/M11.5 timeline summary (CPU hook timestamps; not GPU timings)",
+        "FH2VR M11.4-M11.6 timeline summary (CPU hook timestamps; not GPU timings)",
         f"Events: camera={len(cameras)} valid_camera={len(valid_cameras)} "
         f"direct_execute={len(executes)} present={len(presents)}",
         f"Threads: camera={len({e.tid for e in cameras})} "
@@ -82,6 +82,12 @@ def report(meta: dict[str, str], events: list[Event], max_frames: int = 10) -> s
         f"camera_ready={meta.get('camera_ready_before_capture', '?')} "
         f"dropped={meta.get('dropped', '?')}",
     ]
+    if "camera_hooks_during_capture" in meta:
+        output.append(
+            f"Hook calls during capture={meta['camera_hooks_during_capture']} "
+            f"valid={meta.get('camera_valid_during_capture', '?')} "
+            f"last_valid_age_at_start_ms={meta.get('camera_last_valid_age_start_ms', '?')}"
+        )
     warnings = []
     if meta.get("probe_installed") == "no":
         warnings.append("Camera probe was not installed.")
@@ -91,6 +97,14 @@ def report(meta: dict[str, str], events: list[Event], max_frames: int = 10) -> s
         warnings.append("Event buffer overflowed; some frame intervals may be incomplete.")
     if not valid_cameras:
         warnings.append("No valid camera view matrix samples.")
+        if meta.get("camera_ready_before_capture") == "yes":
+            warnings.append(
+                "Camera was previously active, but no valid events were recorded. "
+                "Older M11.4/M11.5 builds used a cumulative readiness counter; "
+                "inspect runtime camera mode and use the M11.6 fresh-window gate."
+            )
+    if meta.get("camera_hooks_during_capture") == "0":
+        warnings.append("No camera callbacks occurred during capture (M11.6 diagnostic).")
     if not executes:
         warnings.append("No game-owned DIRECT queue executions.")
     if len(presents) < 2:
@@ -147,16 +161,19 @@ def report(meta: dict[str, str], events: list[Event], max_frames: int = 10) -> s
         output.append("Warnings:")
         output.extend(f"  - {warning}" for warning in warnings)
     output.append("For M11.4 captures, camera coordinates were sampled before the chained callback despite the post-update event name.")
-    output.append("M11.5 reads them after the callback; neither measurement proves that the game rebuilt the cached view matrix at that point.")
+    output.append("M11.5/M11.6 read after the callback; this does not prove the game rebuilt the cached view matrix inside the callback.")
     output.append("These correlations do not prove render-pass order or native stereo viability.")
     return "\n".join(output)
 
 
 def main() -> None:
     default_root = Path(os.getenv("LOCALAPPDATA", ".")) / "FH2VR" / "logs"
-    latest = default_root / "FH2VR-FrameTimeline-M11.5.csv"
-    historical = default_root / "FH2VR-FrameTimeline-M11.4.csv"
-    default_csv = latest if latest.exists() else historical
+    candidates = [
+        default_root / "FH2VR-FrameTimeline-M11.6.csv",
+        default_root / "FH2VR-FrameTimeline-M11.5.csv",
+        default_root / "FH2VR-FrameTimeline-M11.4.csv",
+    ]
+    default_csv = next((candidate for candidate in candidates if candidate.exists()), candidates[0])
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("csv", nargs="?", type=Path, default=default_csv,
                         help="M11.4 or M11.5 CSV (defaults to latest existing capture)")
