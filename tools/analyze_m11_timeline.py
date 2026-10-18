@@ -105,6 +105,14 @@ def report(meta: dict[str, str], events: list[Event], max_frames: int = 10) -> s
             )
     if meta.get("camera_hooks_during_capture") == "0":
         warnings.append("No camera callbacks occurred during capture (M11.6 diagnostic).")
+    slot_start = meta.get("camera_hook_slot_at_start")
+    slot_end = meta.get("camera_hook_slot_at_end")
+    if slot_start is not None or slot_end is not None:
+        output.append(f"Camera hook slot: start={slot_start or '?'} end={slot_end or '?'} (1=ours, 0=elsewhere, -1=unknown)")
+        if slot_start == "0" or slot_end == "0":
+            warnings.append("The M11 camera probe no longer occupies the Driver camera vtable slot.")
+        elif slot_start == "-1" or slot_end == "-1":
+            warnings.append("Camera probe slot ownership could not be verified.")
     if not executes:
         warnings.append("No game-owned DIRECT queue executions.")
     if len(presents) < 2:
