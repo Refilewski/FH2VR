@@ -65,7 +65,7 @@ std::filesystem::path file_path() {
     const std::filesystem::path dir = root / L"FH2VR" / L"logs";
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);
-    return dir / L"FH2VR-FrameTimeline-M11.4.csv";
+    return dir / L"FH2VR-FrameTimeline-M11.5.csv";
 }
 
 const char *event_name(Kind kind) {
@@ -108,7 +108,7 @@ DWORD WINAPI timeline_writer(void *) {
     if (!file) return 0;
     const std::uint32_t claimed = g_next.load(std::memory_order_acquire);
     const std::size_t count = claimed < kCapacity ? claimed : kCapacity;
-    file << "# FH2VR M11.4 camera-aware frame timing capture, no VR required\n"
+    file << "# FH2VR M11.5 post-update camera-aware frame timing capture, no VR required\n"
          << "# Passive timestamps from existing game camera and D3D12 hooks.\n"
          << "# camera-post-update = after Driver camera callback; "
             "game-direct-execute = non-mod DIRECT queue; "
@@ -119,7 +119,7 @@ DWORD WINAPI timeline_writer(void *) {
          << " probe_installed=" << (g_probeInstalled.load() ? "yes" : "no")
          << " camera_hook_calls=" << g_cameraCalls.load()
          << " camera_view_valid_calls=" << g_cameraValidCalls.load() << "\n"
-         << "# camera-post-update arg_a: 1=view matrix available, 0=unavailable.\n"
+         << "# camera-post-update arg_a: 1=post-update view matrix available, 0=unavailable.\n"
          << "# samples=" << count << " dropped="
          << (claimed > kCapacity ? claimed - kCapacity : 0)
          << " capture_ms=" << kCaptureDurationMs << "\n"
