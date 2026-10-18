@@ -14,6 +14,7 @@ namespace {
 constexpr std::size_t kCapacity = 32768;
 constexpr DWORD kStartupDelayMs = 9000;
 constexpr DWORD kCaptureDurationMs = 22000;
+constexpr DWORD kWaitForCameraMs = 45000;
 
 enum class Kind : std::uint8_t { Camera, Execute, Present };
 struct Event {
@@ -34,6 +35,9 @@ struct Slot {
 std::array<Slot, kCapacity> g_events{};
 std::atomic<std::uint32_t> g_next{0};
 std::atomic<bool> g_capture{false};
+std::atomic<bool> g_probeInstalled{false};
+std::atomic<std::uint64_t> g_cameraCalls{0};
+std::atomic<std::uint64_t> g_cameraValidCalls{0};
 LONGLONG g_startQpc = 0;
 
 void record(Kind kind, unsigned argA, unsigned argB,
@@ -61,7 +65,7 @@ std::filesystem::path file_path() {
     const std::filesystem::path dir = root / L"FH2VR" / L"logs";
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);
-    return dir / L"FH2VR-FrameTimeline-M11.3.csv";
+    return dir / L"FH2VR-FrameTimeline-M11.4.csv";
 }
 
 const char *event_name(Kind kind) {
@@ -79,6 +83,18 @@ DWORD WINAPI timeline_writer(void *) {
     while (!fh2vr::find_fh2_game_base()) Sleep(500);
     Sleep(kStartupDelayMs);
 
+    // Do not silently measure a menu/loading screen instead of gameplay.
+    // Wait for actual Driver camera callbacks, but time out with diagnostics.
+    DWORD waitedForCamera = 0;
+    while (waitedForCamera < kWaitForCameraMs &&
+           g_cameraValidCalls.load(std::memory_order_acquire) < 5) {
+        Sleep(100);
+        waitedForCamera += 100;
+    }
+    const bool cameraWasActive =
+        g_cameraValidCalls.load(std::memory_order_acquire) >= 5;
+    if (cameraWasActive) Sleep(500);
+
     LARGE_INTEGER frequency{}, start{};
     QueryPerformanceFrequency(&frequency);
     QueryPerformanceCounter(&start);
@@ -92,12 +108,18 @@ DWORD WINAPI timeline_writer(void *) {
     if (!file) return 0;
     const std::uint32_t claimed = g_next.load(std::memory_order_acquire);
     const std::size_t count = claimed < kCapacity ? claimed : kCapacity;
-    file << "# FH2VR M11.3 per-frame timing capture, no VR required\n"
+    file << "# FH2VR M11.4 camera-aware frame timing capture, no VR required\n"
          << "# Passive timestamps from existing game camera and D3D12 hooks.\n"
          << "# camera-post-update = after Driver camera callback; "
             "game-direct-execute = non-mod DIRECT queue; "
             "game-present = primary swapchain before copy/conversion.\n"
          << "# Separate threads can overlap; timing correlation does NOT identify world pass by itself.\n"
+         << "# camera_ready_before_capture=" << (cameraWasActive ? "yes" : "no")
+         << " camera_wait_ms=" << waitedForCamera
+         << " probe_installed=" << (g_probeInstalled.load() ? "yes" : "no")
+         << " camera_hook_calls=" << g_cameraCalls.load()
+         << " camera_view_valid_calls=" << g_cameraValidCalls.load() << "\n"
+         << "# camera-post-update arg_a: 1=view matrix available, 0=unavailable.\n"
          << "# samples=" << count << " dropped="
          << (claimed > kCapacity ? claimed - kCapacity : 0)
          << " capture_ms=" << kCaptureDurationMs << "\n"
@@ -133,8 +155,13 @@ Bootstrap g_bootstrap;
 } // namespace
 
 namespace fh2vr {
-void timeline_note_camera(float x, float y, float z) {
-    record(Kind::Camera, 0, 0, x, y, z);
+void timeline_note_probe_installed(bool installed) {
+    g_probeInstalled.store(installed, std::memory_order_release);
+}
+void timeline_note_camera(bool valid, float x, float y, float z) {
+    g_cameraCalls.fetch_add(1, std::memory_order_relaxed);
+    if (valid) g_cameraValidCalls.fetch_add(1, std::memory_order_release);
+    record(Kind::Camera, valid ? 1u : 0u, 0, x, y, z);
 }
 void timeline_note_execute(unsigned count) {
     record(Kind::Execute, count, 0, 0.0f, 0.0f, 0.0f);
