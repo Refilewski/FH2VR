@@ -45,16 +45,17 @@ std::atomic<ULONGLONG> g_lastValidCameraAtMs{0};
 LONGLONG g_startQpc = 0;
 
 void record(Kind kind, unsigned argA, unsigned argB,
-            float tx, float ty, float tz) {
+            float tx, float ty, float tz, LONGLONG sampledQpc = 0) {
     if (!g_capture.load(std::memory_order_acquire)) return;
 
     const std::uint32_t index = g_next.fetch_add(1, std::memory_order_relaxed);
     if (index >= kCapacity) return;
 
     LARGE_INTEGER now{};
-    QueryPerformanceCounter(&now);
+    if (!sampledQpc) QueryPerformanceCounter(&now);
     Slot &slot = g_events[index];
-    slot.event = Event{now.QuadPart, GetCurrentThreadId(), kind, argA, argB, tx, ty, tz};
+    slot.event = Event{sampledQpc ? sampledQpc : now.QuadPart,
+                       GetCurrentThreadId(), kind, argA, argB, tx, ty, tz};
     slot.ready.store(true, std::memory_order_release);
 }
 
@@ -174,7 +175,7 @@ DWORD WINAPI timeline_writer(void *) {
          << " camera_hook_calls_before_capture=" << hooksBeforeCapture
          << " camera_view_valid_calls_before_capture=" << validBeforeCapture << "\n"
          << "# camera-pre-update / camera-post-update arg_a: 1=matrix available, 0=unavailable.\n"
-         << "# game-direct-execute: arg_a=command list count; for 3/5-list markers arg_b=1 when view translation was sampled.\n"
+         << "# game-direct-execute: arg_a=count; on 3/5-list markers arg_b=1 if matrix read; QPC marks hook entry before read.\n"
          << "# samples=" << count << " dropped="
          << (claimed > kCapacity ? claimed - kCapacity : 0)
          << " capture_ms=" << kCaptureDurationMs << "\n"
@@ -229,9 +230,14 @@ void timeline_note_execute(unsigned count) {
     // All other command lists keep their original low-overhead timestamp.
     if (g_capture.load(std::memory_order_acquire) &&
         (count == 3 || count == 5)) {
+        // Stamp the submission hook *before* traversing camera pointers;
+        // otherwise the read cost would bias its recorded CPU phase.
+        LARGE_INTEGER atEntry{};
+        QueryPerformanceCounter(&atEntry);
         float tx = 0.0f, ty = 0.0f, tz = 0.0f;
         const bool valid = camera_probe_read_cached_view(tx, ty, tz);
-        record(Kind::Execute, count, valid ? 1u : 0u, tx, ty, tz);
+        record(Kind::Execute, count, valid ? 1u : 0u,
+               tx, ty, tz, atEntry.QuadPart);
     } else {
         record(Kind::Execute, count, 0, 0.0f, 0.0f, 0.0f);
     }
