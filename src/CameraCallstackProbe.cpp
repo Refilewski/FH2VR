@@ -303,6 +303,8 @@ Bootstrap g_bootstrap;
 
 namespace fh2vr {
 bool camera_probe_read_cached_view(float &tx, float &ty, float &tz) {
+    // The probe installation release-store also publishes g_gameBase.
+    if (!g_installed.load(std::memory_order_acquire)) return false;
     float translation[3]{};
     if (!read_translation(translation)) {
         return false;
