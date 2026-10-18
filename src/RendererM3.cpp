@@ -1,4 +1,5 @@
 #include "RendererPreview.h"
+#include "CameraFrameTimeline.h"
 
 #include <MinHook.h>
 
@@ -155,6 +156,7 @@ void STDMETHODCALLTYPE execute_command_lists_hook(
         }
         if (primary && queue == primary) {
             g_gameExecuteCalls.fetch_add(1, std::memory_order_relaxed);
+            fh2vr::timeline_note_execute(count);
         }
     }
 
@@ -741,6 +743,7 @@ HRESULT WINAPI present_hook(IDXGISwapChain *swapchain, UINT syncInterval, UINT f
     }
 
     if (swapchain == g_primarySwapchain) {
+        fh2vr::timeline_note_present(syncInterval, flags);
         ++g_presentCountWindow;
         copy_and_convert_current_backbuffer();
 
