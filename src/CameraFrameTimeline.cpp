@@ -12,14 +12,14 @@
 #include <iomanip>
 
 namespace {
-constexpr std::size_t kCapacity = 32768;
+constexpr std::size_t kCapacity = 65536;
 constexpr DWORD kStartupDelayMs = 9000;
 constexpr DWORD kCaptureDurationMs = 22000;
 constexpr DWORD kWaitForCameraMs = 45000;
 constexpr ULONGLONG kCameraFreshWindowMs = 2000;
 constexpr ULONGLONG kCameraLastSeenLimitMs = 500;
 
-enum class Kind : std::uint8_t { Camera, Execute, Present };
+enum class Kind : std::uint8_t { CameraBefore, Camera, Execute, Present };
 struct Event {
     LONGLONG qpc = 0;
     DWORD tid = 0;
@@ -69,11 +69,12 @@ std::filesystem::path file_path() {
     const std::filesystem::path dir = root / L"FH2VR" / L"logs";
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);
-    return dir / L"FH2VR-FrameTimeline-M11.6.csv";
+    return dir / L"FH2VR-FrameTimeline-M11.7.csv";
 }
 
 const char *event_name(Kind kind) {
     switch (kind) {
+    case Kind::CameraBefore: return "camera-pre-update";
     case Kind::Camera: return "camera-post-update";
     case Kind::Execute: return "game-direct-execute";
     case Kind::Present: return "game-present";
@@ -144,7 +145,7 @@ DWORD WINAPI timeline_writer(void *) {
     if (!file) return 0;
     const std::uint32_t claimed = g_next.load(std::memory_order_acquire);
     const std::size_t count = claimed < kCapacity ? claimed : kCapacity;
-    file << "# FH2VR M11.6 fresh-camera-gated frame timing capture, no VR required\n"
+    file << "# FH2VR M11.7 matrix-phase camera/queue timing capture, no VR required\n"
          << "# Passive timestamps from existing game camera and D3D12 hooks.\n"
          << "# camera-post-update = after Driver camera callback; "
             "game-direct-execute = non-mod DIRECT queue; "
@@ -172,7 +173,8 @@ DWORD WINAPI timeline_writer(void *) {
          << " camera_valid_during_capture=" << (validAfterCapture - validBeforeCapture)
          << " camera_hook_calls_before_capture=" << hooksBeforeCapture
          << " camera_view_valid_calls_before_capture=" << validBeforeCapture << "\n"
-         << "# camera-post-update arg_a: 1=post-update view matrix available, 0=unavailable.\n"
+         << "# camera-pre-update / camera-post-update arg_a: 1=matrix available, 0=unavailable.\n"
+         << "# game-direct-execute: arg_a=command list count; for 3/5-list markers arg_b=1 when view translation was sampled.\n"
          << "# samples=" << count << " dropped="
          << (claimed > kCapacity ? claimed - kCapacity : 0)
          << " capture_ms=" << kCaptureDurationMs << "\n"
@@ -211,6 +213,9 @@ namespace fh2vr {
 void timeline_note_probe_installed(bool installed) {
     g_probeInstalled.store(installed, std::memory_order_release);
 }
+void timeline_note_camera_before(bool valid, float x, float y, float z) {
+    record(Kind::CameraBefore, valid ? 1u : 0u, 0, x, y, z);
+}
 void timeline_note_camera(bool valid, float x, float y, float z) {
     g_cameraCalls.fetch_add(1, std::memory_order_relaxed);
     if (valid) {
@@ -220,7 +225,16 @@ void timeline_note_camera(bool valid, float x, float y, float z) {
     record(Kind::Camera, valid ? 1u : 0u, 0, x, y, z);
 }
 void timeline_note_execute(unsigned count) {
-    record(Kind::Execute, count, 0, 0.0f, 0.0f, 0.0f);
+    // Query the cached camera only at two diagnostic submission markers.
+    // All other command lists keep their original low-overhead timestamp.
+    if (g_capture.load(std::memory_order_acquire) &&
+        (count == 3 || count == 5)) {
+        float tx = 0.0f, ty = 0.0f, tz = 0.0f;
+        const bool valid = camera_probe_read_cached_view(tx, ty, tz);
+        record(Kind::Execute, count, valid ? 1u : 0u, tx, ty, tz);
+    } else {
+        record(Kind::Execute, count, 0, 0.0f, 0.0f, 0.0f);
+    }
 }
 void timeline_note_present(unsigned syncInterval, unsigned flags) {
     record(Kind::Present, syncInterval, flags, 0.0f, 0.0f, 0.0f);
