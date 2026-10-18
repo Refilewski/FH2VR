@@ -6,6 +6,32 @@
 
 Find when the FH2 Driver camera updates relative to the game's primary D3D12 DIRECT queue and swapchain Present. This timing data helps narrow down where an independent left/right world pass might be possible. Timestamps alone **do not** prove which command list draws the world or whether a second eye render is safe.
 
+## First reproduce the unchanged M11.4 baseline
+
+The original M11.4 diagnostic build is **commit `7ead44d26189f240ace587159d42f9b1b8c083db`**, from [successful GitHub Actions run #127](https://github.com/Refilewski/FH2VR/actions/runs/39120533828). Download the `FH2VR-Standalone-0.4.0-dev` artifact from **that exact run** (artifact ID `12134340662`, confirmed available on 18 Oct 2026). This produces:
+
+```text
+%LOCALAPPDATA%\FH2VR\logs\FH2VR-FrameTimeline-M11.4.csv
+```
+
+This is the correct build if the task is specifically to complete M11.4's outstanding hardware-free test. Do **not** substitute the public `dev-latest` release or treat a newer PR artifact as identical.
+
+After reviewing M11.4 logs, the later experimental research branch revision may be tested separately. Its post-callback view reads write `FH2VR-FrameTimeline-M11.5.csv`. That distinction matters because M11.4's event name said `camera-post-update` even though the recorded matrix translation came from **before** the chained callback. The M11.5 instrumentation fixes which side of the callback is sampled, but does not prove the cached matrix is recomputed inside that callback.
+
+Analyze either CSV with:
+
+```powershell
+python tools/analyze_m11_timeline.py "C:\Users\$env:USERNAME\AppData\Local\FH2VR\logs\FH2VR-FrameTimeline-M11.4.csv"
+```
+
+To eliminate path expansion ambiguities in PowerShell, the alternative is:
+
+```powershell
+python tools/analyze_m11_timeline.py "$env:LOCALAPPDATA\FH2VR\logs\FH2VR-FrameTimeline-M11.4.csv"
+```
+
+The Python analyzer and its tests live only in the research branch. It can run on existing CSV files and does not inject anything into Azimuth.
+
 ## Run one capture (no VR headset required)
 
 1. Open **PR #10** > **Checks** > successful **Build FH2VR** workflow, download its standalone or FH2ML artifact. Do not use the `dev-latest` release: it is built from the ordinary M10 code, not this research branch.
