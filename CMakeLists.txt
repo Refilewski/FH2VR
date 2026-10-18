@@ -37,6 +37,10 @@ add_library(FH2VR SHARED
   src/FovMatch.cpp
   src/UiModeDetector.cpp
   src/GameBaseLocator.cpp
+  src/CameraResearchV2.cpp
+  src/CameraResearchBootstrap.cpp
+  src/CameraCallstackProbe.cpp
+  src/CameraFrameTimeline.cpp
 )
 target_include_directories(FH2VR PRIVATE include)
 target_compile_definitions(FH2VR PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX OPENVR_BUILD_STATIC)
