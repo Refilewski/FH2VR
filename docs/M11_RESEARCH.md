@@ -1,4 +1,4 @@
-# FH2VR M11.5: camera / D3D12 timeline research
+# FH2VR M11.4–M11.6: camera / D3D12 timeline research
 
 > Research-only branch. This is **not** a stereo renderer. Keep PR #10 unmerged until the traces are understood. The existing M10 mono path remains the user-facing build.
 
@@ -26,6 +26,27 @@ python tools/analyze_m11_timeline.py "$env:LOCALAPPDATA\FH2VR\logs\FH2VR-FrameTi
 
 The Python analyzer and its tests live only in the research branch. It can run on existing CSV files and does not inject anything into Azimuth.
 
+## M11.5 in-game result (user capture, 18 October 2026)
+
+The user supplied `FH2VR-FrameTimeline-M11.5.csv` (not a headset test). **This capture is conclusive about the CPU hook activity within this 22-second window, but not about the world-render function.**
+
+- Header: `probe_installed=yes`, `camera_ready_before_capture=yes`, `camera_wait_ms=0`, `camera_hook_calls=135`, `camera_view_valid_calls=135`, `samples=19706`, `dropped=0`.
+- Recorded events: **camera 0**, **ExecuteCommandLists 18315**, **Present 1391**. No nonzero `view_t*` fields. All Execute and Present events were on thread ID `33348`.
+- Present rate ~63.2 FPS over 22 s; median Present-to-Present interval **15.78165 ms**.
+- Execute argument counts: 15533 with one list, 1391 with three lists, 1391 with five lists. Between each of 1390 complete Present intervals, there was exactly **one** three-list submission and **one** five-list submission; total Execute calls per interval ranged **12–15** (median 13). These are queue submissions, **not proven separate world passes**.
+- **Likely instrumentation issue:** the M11.5 `camera_ready_before_capture=yes` gate only looked at cumulative valid callbacks. The 135 successful calls may all predate recording. The CSV alone cannot identify which camera mode or game state produced them, nor prove that the hook is used for the active world view.
+
+## Follow-up: M11.6 fresh-camera capture gate (research branch only)
+
+The experimental M11.6 update improves diagnostic confidence **without camera writes, stereo changes, yaw/pitch changes or any Azimuth file modifications**.
+
+- After the initial delay, require **five new valid camera callbacks in a rolling two-second window**, with the last one seen within 500 ms, rather than relying on the process-lifetime total. Remove the extra 500 ms delay after readiness.
+- Still fall back after 45 seconds with `camera_ready_before_capture=no`, and record 22 seconds of GPU-hook events for diagnostics.
+- Emit **`FH2VR-FrameTimeline-M11.6.csv`** to avoid overwriting the provided M11.5 evidence.
+- Header adds `camera_hook_calls_before_capture`, `camera_view_valid_calls_before_capture`, `camera_hooks_during_capture`, `camera_valid_during_capture`, `camera_last_valid_age_start_ms`, and `camera_last_valid_age_end_ms`. A value of `-1` for age means no valid callback was observed.
+- Run the branch-specific **standalone Actions artifact** and remain in FH2 Driver free-roam during the measurement. Do **not** use the ordinary `dev-latest` release or inject a second runtime into the same Azimuth PID.
+- If callbacks are still absent or the fresh gate times out, investigate whether gameplay drives the Driver vtable slot at all rather than inferring anything about stereo from Execute/Present counts.
+
 ## Run one capture (no VR headset required)
 
 1. Open **PR #10** > **Checks** > successful **Build FH2VR** workflow, download its standalone or FH2ML artifact. Do not use the `dev-latest` release: it is built from the ordinary M10 code, not this research branch.
@@ -33,7 +54,7 @@ The Python analyzer and its tests live only in the research branch. It can run o
 3. Launch Azimuth / FH2 1.0.0.64. Get into free roam in the **Driver camera** and drive/turn normally.
 4. The probe looks for active Driver camera callbacks before starting the 22-second timeline. Leave the game in free roam long enough for the capture to complete (up to about 75 seconds after startup if the camera activates late).
 5. Close the game normally and find:
-   - `%LOCALAPPDATA%\FH2VR\logs\FH2VR-FrameTimeline-M11.5.csv`
+   - `%LOCALAPPDATA%\FH2VR\logs\FH2VR-FrameTimeline-M11.6.csv` (when testing current branch; retain the older M11.5 CSV separately)
    - `%LOCALAPPDATA%\FH2VR\logs\FH2VR-Callstack-M11.2.log`
    - `%LOCALAPPDATA%\FH2VR\logs\FH2VR-CameraResearch.log` (if generated)
 
