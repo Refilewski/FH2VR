@@ -21,12 +21,6 @@ After reviewing M11.4 logs, the later experimental research branch revision may 
 Analyze either CSV with:
 
 ```powershell
-python tools/analyze_m11_timeline.py "C:\Users\$env:USERNAME\AppData\Local\FH2VR\logs\FH2VR-FrameTimeline-M11.4.csv"
-```
-
-To eliminate path expansion ambiguities in PowerShell, the alternative is:
-
-```powershell
 python tools/analyze_m11_timeline.py "$env:LOCALAPPDATA\FH2VR\logs\FH2VR-FrameTimeline-M11.4.csv"
 ```
 
