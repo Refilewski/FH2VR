@@ -50,7 +50,7 @@ std::atomic<bool> g_installed{false};
 std::atomic<bool> g_stop{false};
 std::uintptr_t g_gameBase = 0;
 CameraUpdateFn g_previous = nullptr;
-ULONGLONG g_lastSampleAt = 0;
+std::atomic<ULONGLONG> g_lastSampleAt{0};
 
 bool readable(const void *address, std::size_t size) {
     if (!address || size == 0) return false;
@@ -139,22 +139,32 @@ void enqueue_sample(const Sample &sample) {
 }
 
 void camera_probe_hook(void *camera, float dt, unsigned char reset) {
+    // Only the infrequent call-stack sample needs a pre-update matrix. The
+    // frame timeline instead records the actual post-update matrix every time.
+    const ULONGLONG now = GetTickCount64();
+    ULONGLONG previousSampleAt = g_lastSampleAt.load(std::memory_order_relaxed);
+    const bool sampleStack =
+        now >= previousSampleAt && now - previousSampleAt >= kSampleEveryMs &&
+        g_lastSampleAt.compare_exchange_strong(
+            previousSampleAt, now, std::memory_order_relaxed);
+
     float before[3]{};
-    const bool haveBefore = read_translation(before);
+    const bool haveBefore = sampleStack && read_translation(before);
 
     if (g_previous) {
         g_previous(camera, dt, reset);
     }
-    fh2vr::timeline_note_camera(haveBefore,
-                                haveBefore ? before[0] : 0.0f,
-                                haveBefore ? before[1] : 0.0f,
-                                haveBefore ? before[2] : 0.0f);
 
-    const ULONGLONG now = GetTickCount64();
-    if (g_lastSampleAt != 0 && now - g_lastSampleAt < kSampleEveryMs) {
+    float after[3]{};
+    const bool haveAfter = read_translation(after);
+    fh2vr::timeline_note_camera(haveAfter,
+                                haveAfter ? after[0] : 0.0f,
+                                haveAfter ? after[1] : 0.0f,
+                                haveAfter ? after[2] : 0.0f);
+
+    if (!sampleStack) {
         return;
     }
-    g_lastSampleAt = now;
 
     Sample sample{};
     sample.tick = now;
@@ -163,7 +173,10 @@ void camera_probe_hook(void *camera, float dt, unsigned char reset) {
     if (haveBefore) {
         std::memcpy(sample.before, before, sizeof(before));
     }
-    sample.haveAfter = read_translation(sample.after);
+    sample.haveAfter = haveAfter;
+    if (haveAfter) {
+        std::memcpy(sample.after, after, sizeof(after));
+    }
     sample.frameCount = RtlCaptureStackBackTrace(
         0, static_cast<ULONG>(sample.frames.size()), sample.frames.data(), nullptr);
     enqueue_sample(sample);
