@@ -1,4 +1,4 @@
-# FH2VR M11.4–M11.6: camera / D3D12 timeline research
+# FH2VR M11.4–M11.7: camera / D3D12 timeline research
 
 > Research-only branch. This is **not** a stereo renderer. Keep PR #10 unmerged until the traces are understood. The existing M10 mono path remains the user-facing build.
 
@@ -48,6 +48,35 @@ The experimental M11.6 update improves diagnostic confidence **without camera wr
 - Run the branch-specific **standalone Actions artifact** and remain in FH2 Driver free-roam during the measurement. Do **not** use the ordinary `dev-latest` release or inject a second runtime into the same Azimuth PID.
 - If callbacks are still absent or the fresh gate times out, investigate whether gameplay drives the Driver vtable slot at all rather than inferring anything about stereo from Execute/Present counts.
 
+## M11.6: active camera / render correlation (18 October 2026, user logs)
+
+Source traces from the **same standalone process (azimuth PID 29604)**: `FH2VR-Launcher.log`, `FH2VR-Callstack-M11.2.log`, `FH2VR-CameraResearch-M11.1.log` and `FH2VR-FrameTimeline-M11.6.csv`.
+
+- Launcher reports successful standalone injection; the previous runtime session was cleaned up, so this log **does not show double injection**.
+- Camera integrity: `probe_installed=yes`, `camera_ready_before_capture=yes`, `camera_wait_ms=100`, 160 valid callbacks before the capture; `camera_hook_slot_at_start=1` and `camera_hook_slot_at_end=1`; 1681/1681 callbacks valid **during** capture; last callback age 0ms at both boundaries.
+- M11.6: **25,582 events, 0 dropped**, 22s: **1681 camera-post-update**, **1681 primary Present**, **22,220 game DIRECT ExecuteCommandLists**. Camera hooks ran on **TID 8168**, all Execute/Present on **TID 3484**.
+- **Every one of the 1680 complete Present→Present intervals contained exactly one camera callback.** Median Present period **13.0619ms (~76.56 FPS)**.
+- Per full Present interval: game-owned DIRECT submissions were 11–16; overall count arguments: `1-list=18858`, `3-list=1680`, `5-list=1681`, `2-list=1` (isolated anomaly).
+- Phase order **3-list → camera → 5-list** occurs in **1664/1680** complete intervals. Exceptions: 15 have camera before 3-list; one has 2-list instead of 3-list. The 5-list submission occurs just before the next Present (median gap **0.0179ms**).
+- Relative to previous Present, median timestamps are **3-list +2.2233ms; camera +3.0050ms; 5-list +13.0442ms**. Camera→next Present median about **10.0251ms**. These are **CPU timestamps on two distinct threads**, not a GPU dependency graph.
+- `M11.2` callstack: **40/40 samples** ran on TID 8168, caller `FH2+0xFE60F9`. The cached view translation was **identical before and after the chained callback in every sampled pair**, while values changed across different samples. This supports the *hypothesis* that the callback is not the direct cached-matrix writer, but does not prove it.
+- `M11.1` view tracking: **226 samples** with the expected camera vtable `0x2C6C840`, 211 changes, 15 heartbeat records and one stable camera pointer. Its camera position/direction/FOV evolve over time in a way consistent with gameplay.
+
+**Interpretation:** We now have strong evidence of a 1:1 camera-hook ↔ Present *frame pacing* relationship and a repeatable CPU ordering. We **do not** have proof that the three-list batch draws the world, that the callback updates a rendering constant buffer, or that a second stereo pass can be inserted.
+
+## M11.7: locate cached view matrix changes without modifying game state
+
+Follow-up instrumentation on this research branch, **not a tested VR/stereo implementation**:
+
+- Write an isolated `%LOCALAPPDATA%\FH2VR\logs\FH2VR-FrameTimeline-M11.7.csv` so earlier M11.5/M11.6 logs remain intact.
+- Capture `camera-pre-update` and `camera-post-update` view translations around the chained Driver camera callback.
+- Sample the cached camera view translation on **3-list and 5-list** game-owned DIRECT `ExecuteCommandLists` markers only; `arg_b=1` marks a successful matrix read. Other calls remain timestamp-only.
+- Compare the four CPU phases **3-list → camera-pre → camera-post → 5-list** in the Python analyzer. Record which intervals contain a different view translation; this narrows the cached-matrix update window but cannot identify the shader or D3D12 CB upload alone.
+- Increase the bounded in-memory event capacity to 65,536 because the extra pre-camera event must not silently overflow a moderately high-FPS capture; `dropped` still reports overflow.
+- Existing M10.2 render/camera yaw-pitch behaviour is unchanged; do not merge PR #10 into main or overwrite game/Azimuth files.
+
+**Next evidence gate:** obtain one M11.7 CSV using the successful artifact of the **specific CI run on this branch**, and compare matrix values. No second-eye rendering or projection changes until the target world pass and view/projection GPU constant-buffer binding are identified.
+
 ## Run one capture (no VR headset required)
 
 1. Open **PR #10** > **Checks** > successful **Build FH2VR** workflow, download its standalone or FH2ML artifact. Do not use the `dev-latest` release: it is built from the ordinary M10 code, not this research branch.
@@ -55,11 +84,11 @@ The experimental M11.6 update improves diagnostic confidence **without camera wr
 3. Launch Azimuth / FH2 1.0.0.64. Get into free roam in the **Driver camera** and drive/turn normally.
 4. The probe looks for active Driver camera callbacks before starting the 22-second timeline. Leave the game in free roam long enough for the capture to complete (up to about 75 seconds after startup if the camera activates late).
 5. Close the game normally and find:
-   - `%LOCALAPPDATA%\FH2VR\logs\FH2VR-FrameTimeline-M11.6.csv` (when testing current branch; retain the older M11.5 CSV separately)
+   - `%LOCALAPPDATA%\FH2VR\logs\FH2VR-FrameTimeline-M11.7.csv` (current branch; retain the older M11.5 and M11.6 CSVs)
    - `%LOCALAPPDATA%\FH2VR\logs\FH2VR-Callstack-M11.2.log`
    - `%LOCALAPPDATA%\FH2VR\logs\FH2VR-CameraResearch.log` (if generated)
 
-Only these FH2VR diagnostic logs are needed. Do **not** upload game binaries, license keys, game saves, or complete memory dumps.
+Only these FH2VR diagnostic logs are needed. Do **not** upload game binaries, license keys, game saves, or complete memory dumps.\n\nAnalyze the new M11.7 matrix phases with:\n\n```powershell\npython tools/analyze_m11_timeline.py "$env:LOCALAPPDATA\FH2VR\logs\FH2VR-FrameTimeline-M11.7.csv"\n```
 
 ## What the CSV means
 
