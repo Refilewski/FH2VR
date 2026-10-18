@@ -71,6 +71,32 @@ class TimelineAnalyzerTests(unittest.TestCase):
         self.assertIn("No valid camera view matrix samples", result)
         self.assertIn("These correlations do not prove render-pass order", result)
 
+    def test_historical_stale_camera_gate_warning(self):
+        rows = [
+            (1000, 11, "game-present", 1, 0, 0, 0),
+            (2000, 33, "game-direct-execute", 1, 0, 0, 0),
+            (6000, 11, "game-present", 1, 0, 0, 0),
+        ]
+        meta, events = self.load(make_csv(rows, ready="yes", installed="yes"))
+        result = analyzer.report(meta, events)
+        self.assertIn("Camera was previously active, but no valid events", result)
+
+    def test_m11_6_explicit_no_camera_during_capture(self):
+        rows = [
+            (1000, 11, "game-present", 1, 0, 0, 0),
+            (6000, 11, "game-present", 1, 0, 0, 0),
+        ]
+        data = make_csv(rows)
+        data = data.replace(
+            "# samples=", 
+            "# camera_hooks_during_capture=0 camera_valid_during_capture=0 "
+            "camera_last_valid_age_start_ms=9900\n# samples="
+        )
+        meta, events = self.load(data)
+        result = analyzer.report(meta, events)
+        self.assertIn("Hook calls during capture=0 valid=0", result)
+        self.assertIn("No camera callbacks occurred during capture", result)
+
     def test_invalid_header_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "missing columns"):
             self.load("index,event,time_us\n0,game-present,1\n")
