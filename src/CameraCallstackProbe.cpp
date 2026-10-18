@@ -1,5 +1,6 @@
 #include "GameBaseLocator.h"
 #include "CameraFrameTimeline.h"
+#include "CameraProbeStatus.h"
 
 #include <windows.h>
 
@@ -295,3 +296,18 @@ struct Bootstrap {
 Bootstrap g_bootstrap;
 
 } // namespace
+
+namespace fh2vr {
+int camera_probe_slot_state() {
+    if (!g_installed.load(std::memory_order_acquire) || !g_gameBase) {
+        return -1;
+    }
+    auto *slot = reinterpret_cast<CameraUpdateFn *>(
+        g_gameBase + kDriverCameraVtableRva + kCameraUpdateSlot);
+    CameraUpdateFn current = nullptr;
+    if (!read_value(slot, current)) {
+        return -1;
+    }
+    return current == &camera_probe_hook ? 1 : 0;
+}
+} // namespace fh2vr
