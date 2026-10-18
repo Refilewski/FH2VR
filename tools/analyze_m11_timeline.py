@@ -12,7 +12,6 @@ import csv
 import os
 import re
 import statistics
-from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -34,7 +33,7 @@ def read_capture(path: Path) -> tuple[dict[str, str], list[Event]]:
     with path.open("r", encoding="utf-8-sig", errors="replace") as file:
         for line in file:
             if line.lstrip().startswith("#"):
-                for key, value in re.findall(r"([a-z_]+)=([^\\s]+)", line):
+                for key, value in re.findall(r"([a-z_]+)=(\\S+)", line):
                     metadata[key] = value.strip()
             elif line.strip():
                 csv_lines.append(line)
@@ -67,13 +66,13 @@ def median_or_none(values: list[float]) -> float | None:
 
 
 def report(meta: dict[str, str], events: list[Event], max_frames: int = 10) -> str:
-    counts = Counter(e.name for e in events)
+    # Original capture order is CPU ordering; it does not identify any GPU pass.
     cameras = [e for e in events if e.name == "camera-post-update"]
     valid_cameras = [e for e in cameras if e.arg_a == 1]
     executes = [e for e in events if e.name == "game-direct-execute"]
     presents = [e for e in events if e.name == "game-present"]
     output = [
-        "FH2VR M11.5 timeline summary (CPU hook timestamps; not GPU timings)",
+        "FH2VR M11.4/M11.5 timeline summary (CPU hook timestamps; not GPU timings)",
         f"Events: camera={len(cameras)} valid_camera={len(valid_cameras)} "
         f"direct_execute={len(executes)} present={len(presents)}",
         f"Threads: camera={len({e.tid for e in cameras})} "
@@ -91,7 +90,7 @@ def report(meta: dict[str, str], events: list[Event], max_frames: int = 10) -> s
     if meta.get("dropped", "0").isdigit() and int(meta.get("dropped", "0")):
         warnings.append("Event buffer overflowed; some frame intervals may be incomplete.")
     if not valid_cameras:
-        warnings.append("No valid post-update camera matrix samples.")
+        warnings.append("No valid camera view matrix samples.")
     if not executes:
         warnings.append("No game-owned DIRECT queue executions.")
     if len(presents) < 2:
@@ -147,15 +146,20 @@ def report(meta: dict[str, str], events: list[Event], max_frames: int = 10) -> s
     if warnings:
         output.append("Warnings:")
         output.extend(f"  - {warning}" for warning in warnings)
+    output.append("For M11.4 captures, camera coordinates were sampled before the chained callback despite the post-update event name.")
+    output.append("M11.5 reads them after the callback; neither measurement proves that the game rebuilt the cached view matrix at that point.")
     output.append("These correlations do not prove render-pass order or native stereo viability.")
     return "\n".join(output)
 
 
 def main() -> None:
     default_root = Path(os.getenv("LOCALAPPDATA", ".")) / "FH2VR" / "logs"
+    latest = default_root / "FH2VR-FrameTimeline-M11.5.csv"
+    historical = default_root / "FH2VR-FrameTimeline-M11.4.csv"
+    default_csv = latest if latest.exists() else historical
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("csv", nargs="?", type=Path,
-                        default=default_root / "FH2VR-FrameTimeline-M11.5.csv")
+    parser.add_argument("csv", nargs="?", type=Path, default=default_csv,
+                        help="M11.4 or M11.5 CSV (defaults to latest existing capture)")
     parser.add_argument("--frames", type=int, default=10,
                         help="number of example Present intervals to show")
     args = parser.parse_args()
