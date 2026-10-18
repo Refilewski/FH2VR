@@ -1,4 +1,5 @@
 #include "CameraFrameTimeline.h"
+#include "CameraProbeStatus.h"
 #include "GameBaseLocator.h"
 
 #include <windows.h>
@@ -113,6 +114,7 @@ DWORD WINAPI timeline_writer(void *) {
         }
     }
 
+    const int hookSlotAtStart = fh2vr::camera_probe_slot_state();
     const ULONGLONG captureStartTick = GetTickCount64();
     const ULONGLONG lastValidBeforeCapture =
         g_lastValidCameraAtMs.load(std::memory_order_acquire);
@@ -129,6 +131,7 @@ DWORD WINAPI timeline_writer(void *) {
     Sleep(kCaptureDurationMs);
     g_capture.store(false, std::memory_order_release);
     const ULONGLONG captureEndTick = GetTickCount64();
+    const int hookSlotAtEnd = fh2vr::camera_probe_slot_state();
     const std::uint64_t hooksAfterCapture =
         g_cameraCalls.load(std::memory_order_acquire);
     const std::uint64_t validAfterCapture =
@@ -162,6 +165,9 @@ DWORD WINAPI timeline_writer(void *) {
          << (lastValidAfterCapture && captureEndTick >= lastValidAfterCapture
                  ? static_cast<long long>(captureEndTick - lastValidAfterCapture)
                  : -1ll) << "\n"
+         << "# camera_hook_slot_at_start=" << hookSlotAtStart
+         << " camera_hook_slot_at_end=" << hookSlotAtEnd
+         << " camera_hook_slot_legend=1:probe,0:other,-1:unknown" << "\n"
          << "# camera_hooks_during_capture=" << (hooksAfterCapture - hooksBeforeCapture)
          << " camera_valid_during_capture=" << (validAfterCapture - validBeforeCapture)
          << " camera_hook_calls_before_capture=" << hooksBeforeCapture
