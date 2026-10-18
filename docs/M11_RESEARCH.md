@@ -44,6 +44,7 @@ The experimental M11.6 update improves diagnostic confidence **without camera wr
 - Still fall back after 45 seconds with `camera_ready_before_capture=no`, and record 22 seconds of GPU-hook events for diagnostics.
 - Emit **`FH2VR-FrameTimeline-M11.6.csv`** to avoid overwriting the provided M11.5 evidence.
 - Header adds `camera_hook_calls_before_capture`, `camera_view_valid_calls_before_capture`, `camera_hooks_during_capture`, `camera_valid_during_capture`, `camera_last_valid_age_start_ms`, and `camera_last_valid_age_end_ms`. A value of `-1` for age means no valid callback was observed.
+- Header also reports read-only `camera_hook_slot_at_start` and `camera_hook_slot_at_end`: `1` means M11 probe still owns the Driver vtable slot, `0` means the slot points elsewhere, `-1` means the state is unavailable. This distinguishes an overwritten hook from a hook that is intact but not called. The probe does **not** rewrite the slot during this check.
 - Run the branch-specific **standalone Actions artifact** and remain in FH2 Driver free-roam during the measurement. Do **not** use the ordinary `dev-latest` release or inject a second runtime into the same Azimuth PID.
 - If callbacks are still absent or the fresh gate times out, investigate whether gameplay drives the Driver vtable slot at all rather than inferring anything about stereo from Execute/Present counts.
 
