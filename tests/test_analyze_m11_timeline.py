@@ -97,6 +97,18 @@ class TimelineAnalyzerTests(unittest.TestCase):
         self.assertIn("Hook calls during capture=0 valid=0", result)
         self.assertIn("No camera callbacks occurred during capture", result)
 
+    def test_camera_slot_replaced_is_reported(self):
+        rows = [(1000, 11, "game-present", 1, 0, 0, 0),
+                (6000, 11, "game-present", 1, 0, 0, 0)]
+        data = make_csv(rows).replace(
+            "# samples=",
+            "# camera_hook_slot_at_start=1 camera_hook_slot_at_end=0\n# samples="
+        )
+        meta, events = self.load(data)
+        report = analyzer.report(meta, events)
+        self.assertIn("Camera hook slot: start=1 end=0", report)
+        self.assertIn("no longer occupies the Driver camera vtable slot", report)
+
     def test_invalid_header_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "missing columns"):
             self.load("index,event,time_us\n0,game-present,1\n")
