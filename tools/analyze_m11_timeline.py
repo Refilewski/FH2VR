@@ -33,7 +33,7 @@ def read_capture(path: Path) -> tuple[dict[str, str], list[Event]]:
     with path.open("r", encoding="utf-8-sig", errors="replace") as file:
         for line in file:
             if line.lstrip().startswith("#"):
-                for key, value in re.findall(r"([a-z_]+)=(\\S+)", line):
+                for key, value in re.findall(r"([a-z_]+)=(\S+)", line):
                     metadata[key] = value.strip()
             elif line.strip():
                 csv_lines.append(line)
