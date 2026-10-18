@@ -23,6 +23,9 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Validate M11 camera timeline analyzer
+        run: python -m unittest discover -s tests -p "test_*.py" -v
+
       - name: Configure native runtime
         run: cmake -S . -B build -A x64
 
