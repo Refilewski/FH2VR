@@ -109,6 +109,43 @@ class TimelineAnalyzerTests(unittest.TestCase):
         self.assertIn("Camera hook slot: start=1 end=0", report)
         self.assertIn("no longer occupies the Driver camera vtable slot", report)
 
+    def test_m11_6_one_camera_per_present_and_phase_order(self):
+        rows = [
+            (0, 11, "game-present", 0, 0, 0, 0),
+            (2000, 11, "game-direct-execute", 3, 0, 0, 0),
+            (3000, 22, "camera-post-update", 1, 1, 2, 3),
+            (12980, 11, "game-direct-execute", 5, 0, 0, 0),
+            (13000, 11, "game-present", 0, 0, 0, 0),
+            (15100, 11, "game-direct-execute", 3, 0, 0, 0),
+            (16000, 22, "camera-post-update", 1, 2, 3, 4),
+            (25980, 11, "game-direct-execute", 5, 0, 0, 0),
+            (26000, 11, "game-present", 0, 0, 0, 0),
+        ]
+        meta, events = self.load(make_csv(rows))
+        result = analyzer.report(meta, events)
+        self.assertIn("Frames with valid camera update=2/2", result)
+        self.assertIn("Full camera/3-list/5-list intervals=2/2", result)
+        self.assertIn("CPU phase order execute3 -> camera -> execute5: 2/2", result)
+        self.assertIn("execute3=2.050ms", result)
+
+    def test_m11_7_matrix_phase_change_outside_camera_callback(self):
+        csv_text = (
+            "# camera_ready_before_capture=yes probe_installed=yes dropped=0\n"
+            "index,time_us,thread_id,event,arg_a,arg_b,view_tx,view_ty,view_tz\n"
+            "0,0,11,game-present,0,512,0,0,0\n"
+            "1,2000,11,game-direct-execute,3,1,1,2,3\n"
+            "2,2500,22,camera-pre-update,1,0,4,2,3\n"
+            "3,3000,22,camera-post-update,1,0,4,2,3\n"
+            "4,12980,11,game-direct-execute,5,1,7,2,3\n"
+            "5,13000,11,game-present,0,512,0,0,0\n"
+        )
+        meta, events = self.load(csv_text)
+        result = analyzer.report(meta, events)
+        self.assertIn("complete ordered 3/pre/post/5 frames=1/1", result)
+        self.assertIn("3-list -> camera-pre: changed >0.01 in 1/1", result)
+        self.assertIn("camera-pre -> camera-post: changed >0.01 in 0/1", result)
+        self.assertIn("camera-post -> 5-list: changed >0.01 in 1/1", result)
+
     def test_invalid_header_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "missing columns"):
             self.load("index,event,time_us\n0,game-present,1\n")
