@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Summarize FH2VR M11.5 CPU camera/D3D12/Present timelines.
+"""Summarize FH2VR M11.4–M11.7 CPU camera/D3D12/Present timelines.
 
 No dependencies outside the Python standard library. This script does not
 identify a GPU world pass; it only checks CPU-side event ordering.
@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import bisect
+import collections
 import csv
 import os
 import re
@@ -25,6 +26,7 @@ class Event:
     tx: float
     ty: float
     tz: float
+    arg_b: int = 0
 
 
 def read_capture(path: Path) -> tuple[dict[str, str], list[Event]]:
@@ -54,6 +56,7 @@ def read_capture(path: Path) -> tuple[dict[str, str], list[Event]]:
                 float(row["view_tx"]),
                 float(row["view_ty"]),
                 float(row["view_tz"]),
+                int(row.get("arg_b", "0")),
             ))
         except (TypeError, ValueError) as exc:
             raise ValueError("Invalid timeline row: " + str(row)) from exc
@@ -68,11 +71,12 @@ def median_or_none(values: list[float]) -> float | None:
 def report(meta: dict[str, str], events: list[Event], max_frames: int = 10) -> str:
     # Original capture order is CPU ordering; it does not identify any GPU pass.
     cameras = [e for e in events if e.name == "camera-post-update"]
+    pre_cameras = [e for e in events if e.name == "camera-pre-update"]
     valid_cameras = [e for e in cameras if e.arg_a == 1]
     executes = [e for e in events if e.name == "game-direct-execute"]
     presents = [e for e in events if e.name == "game-present"]
     output = [
-        "FH2VR M11.4-M11.6 timeline summary (CPU hook timestamps; not GPU timings)",
+        "FH2VR M11.4-M11.7 timeline summary (CPU hook timestamps; not GPU timings)",
         f"Events: camera={len(cameras)} valid_camera={len(valid_cameras)} "
         f"direct_execute={len(executes)} present={len(presents)}",
         f"Threads: camera={len({e.tid for e in cameras})} "
@@ -133,6 +137,8 @@ def report(meta: dict[str, str], events: list[Event], max_frames: int = 10) -> s
         times = [event.time_us for event in events]
         camera_counts = []
         execute_counts = []
+        phase_order = collections.Counter()
+        phase_medians = {"execute3": [], "camera": [], "execute5": []}
         camera_to_present = []
         preview = []
         for previous, current in zip(presents, presents[1:]):
@@ -141,6 +147,16 @@ def report(meta: dict[str, str], events: list[Event], max_frames: int = 10) -> s
             frame_events = events[first:last]
             frame_cameras = [e for e in frame_events if e.name == "camera-post-update" and e.arg_a == 1]
             frame_executes = [e for e in frame_events if e.name == "game-direct-execute"]
+            special_events = [e for e in frame_events if e.name == "camera-post-update" or
+                              (e.name == "game-direct-execute" and e.arg_a >= 2)]
+            phase_order[tuple("camera" if e.name == "camera-post-update" else
+                              f"execute{e.arg_a}" for e in special_events)] += 1
+            execute3 = [e for e in frame_executes if e.arg_a == 3]
+            execute5 = [e for e in frame_executes if e.arg_a == 5]
+            if len(frame_cameras) == len(execute3) == len(execute5) == 1:
+                phase_medians["execute3"].append(execute3[0].time_us - previous.time_us)
+                phase_medians["camera"].append(frame_cameras[0].time_us - previous.time_us)
+                phase_medians["execute5"].append(execute5[0].time_us - previous.time_us)
             camera_counts.append(len(frame_cameras))
             execute_counts.append(len(frame_executes))
             lag = current.time_us - frame_cameras[-1].time_us if frame_cameras else None
@@ -163,13 +179,23 @@ def report(meta: dict[str, str], events: list[Event], max_frames: int = 10) -> s
         if lag is not None:
             output.append(f"Camera-after-update -> next Present (same interval): "
                           f"median={lag / 1000:.3f} ms")
+        if phase_medians["execute3"]:
+            output.append("Full camera/3-list/5-list intervals="
+                          f"{len(phase_medians['execute3'])}/{len(camera_counts)}")
+            output.append("Median phase since preceding Present (CPU): "
+                          + ", ".join(f"{phase}={statistics.median(values)/1000:.3f}ms"
+                                      for phase, values in phase_medians.items()))
+            for pattern, count in phase_order.most_common(3):
+                output.append(f"CPU phase order {' -> '.join(pattern)}: {count}/{len(camera_counts)}")
         output.append("First frame intervals:")
         output.extend(preview)
     if warnings:
         output.append("Warnings:")
         output.extend(f"  - {warning}" for warning in warnings)
     output.append("For M11.4 captures, camera coordinates were sampled before the chained callback despite the post-update event name.")
-    output.append("M11.5/M11.6 read after the callback; this does not prove the game rebuilt the cached view matrix inside the callback.")
+    output.append("M11.5–M11.7 read after the callback; this does not prove the game rebuilt the cached view matrix inside the callback.")
+    if pre_cameras:
+        output.append(f"Pre-camera markers={len(pre_cameras)}; sampled cached matrix phases require analyzing M11.7 stage values, not assuming camera callback updates the matrix.")
     output.append("These correlations do not prove render-pass order or native stereo viability.")
     return "\n".join(output)
 
@@ -177,6 +203,7 @@ def report(meta: dict[str, str], events: list[Event], max_frames: int = 10) -> s
 def main() -> None:
     default_root = Path(os.getenv("LOCALAPPDATA", ".")) / "FH2VR" / "logs"
     candidates = [
+        default_root / "FH2VR-FrameTimeline-M11.7.csv",
         default_root / "FH2VR-FrameTimeline-M11.6.csv",
         default_root / "FH2VR-FrameTimeline-M11.5.csv",
         default_root / "FH2VR-FrameTimeline-M11.4.csv",
@@ -184,7 +211,7 @@ def main() -> None:
     default_csv = next((candidate for candidate in candidates if candidate.exists()), candidates[0])
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("csv", nargs="?", type=Path, default=default_csv,
-                        help="M11.4 or M11.5 CSV (defaults to latest existing capture)")
+                        help="M11.4 through M11.7 CSV (defaults to latest existing capture)")
     parser.add_argument("--frames", type=int, default=10,
                         help="number of example Present intervals to show")
     args = parser.parse_args()
