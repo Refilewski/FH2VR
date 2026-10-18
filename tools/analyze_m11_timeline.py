@@ -224,7 +224,16 @@ def report(meta: dict[str, str], events: list[Event], max_frames: int = 10) -> s
     output.append("For M11.4 captures, camera coordinates were sampled before the chained callback despite the post-update event name.")
     output.append("M11.5–M11.7 read after the callback; this does not prove the game rebuilt the cached view matrix inside the callback.")
     if pre_cameras:
-        output.append(f"Pre-camera markers={len(pre_cameras)}; sampled cached matrix phases require analyzing M11.7 stage values, not assuming camera callback updates the matrix.")
+        markers3 = [e for e in executes if e.arg_a == 3]
+        markers5 = [e for e in executes if e.arg_a == 5]
+        output.append(
+            f"M11.7 matrix validity: camera-pre={sum(e.arg_a == 1 for e in pre_cameras)}/{len(pre_cameras)} "
+            f"3-list={sum(e.arg_b == 1 for e in markers3)}/{len(markers3)} "
+            f"5-list={sum(e.arg_b == 1 for e in markers5)}/{len(markers5)}"
+        )
+        if not any(e.arg_b == 1 for e in markers3) or not any(e.arg_b == 1 for e in markers5):
+            output.append("Warning: No valid 3-list or 5-list cached view samples; phase comparison may be incomplete.")
+        output.append("M11.7 phase markers do not imply the callback updates the cached matrix.")
     output.append("These correlations do not prove render-pass order or native stereo viability.")
     return "\n".join(output)
 
