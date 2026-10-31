@@ -45,7 +45,7 @@ target_link_libraries(FH2VR PRIVATE openvr_api64 minhook user32 gdi32 d3d11 d3d1
 set_target_properties(FH2VR PROPERTIES OUTPUT_NAME FH2VR)
 
 install(TARGETS FH2VR RUNTIME DESTINATION . COMPONENT FH2VR)
-install(FILES mod.json README.md THIRD_PARTY.md DESTINATION . COMPONENT FH2VR)
+install(FILES mod.json README.md LICENSE THIRD_PARTY.md DESTINATION . COMPONENT FH2VR)
 install(FILES "${openvr_SOURCE_DIR}/LICENSE"
         DESTINATION licenses
         RENAME OpenVR-LICENSE.txt
