@@ -79,8 +79,8 @@ jobs:
           mkdir -p release-assets
           (cd artifact-fh2ml && zip -q -r ../release-assets/FH2VR-FH2ML-dev-latest.zip .)
           (cd artifact-standalone && zip -q -r ../release-assets/FH2VR-Standalone-dev-latest.zip .)
-          unzip -Z1 release-assets/FH2VR-FH2ML-dev-latest.zip | grep -qx './LICENSE'
-          unzip -Z1 release-assets/FH2VR-Standalone-dev-latest.zip | grep -qx './LICENSE'
+          unzip -Z1 release-assets/FH2VR-FH2ML-dev-latest.zip | grep -qx 'LICENSE'
+          unzip -Z1 release-assets/FH2VR-Standalone-dev-latest.zip | grep -qx 'LICENSE'
           sha256sum release-assets/*.zip
 
       - name: Replace existing dev-latest release assets
