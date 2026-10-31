@@ -24,7 +24,9 @@ permissions:
 
 jobs:
   publish:
-    if: github.event_name == 'workflow_dispatch' || github.event.head_commit.message == 'ci: publish MIT artifacts from run 41233157492'
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.head_commit.message == 'ci: publish MIT artifacts from run 41233157492'
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
