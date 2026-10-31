@@ -47,6 +47,7 @@ jobs:
             'FH2VR.dll',
             'mod.json',
             'README.md',
+            'LICENSE',
             'THIRD_PARTY.md',
             'OpenVR-LICENSE.txt',
             'MinHook-LICENSE.txt'
@@ -85,6 +86,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path 'standalone-package/licenses' | Out-Null
           Copy-Item 'standalone-publish/FH2VR.exe' 'standalone-package/FH2VR.exe'
           Copy-Item 'README.md' 'standalone-package/README.md'
+          Copy-Item 'LICENSE' 'standalone-package/LICENSE'
           Copy-Item 'THIRD_PARTY.md' 'standalone-package/THIRD_PARTY.md'
           Copy-Item 'package/licenses/OpenVR-LICENSE.txt' 'standalone-package/licenses/OpenVR-LICENSE.txt'
           Copy-Item 'package/licenses/MinHook-LICENSE.txt' 'standalone-package/licenses/MinHook-LICENSE.txt'
@@ -95,6 +97,7 @@ jobs:
           $expected = @(
             'FH2VR.exe',
             'README.md',
+            'LICENSE',
             'THIRD_PARTY.md',
             'licenses/OpenVR-LICENSE.txt',
             'licenses/MinHook-LICENSE.txt'
