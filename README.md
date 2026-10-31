@@ -9,7 +9,7 @@
   <img src="https://img.shields.io/badge/Status-Abandoned-critical?style=for-the-badge" alt="Project status: Abandoned" />
   <img src="https://img.shields.io/badge/Rendering-Mono%20only-orange?style=for-the-badge" alt="Rendering: Mono only" />
   <a href="https://github.com/Refilewski/FH2VR/releases/tag/dev-latest"><img src="https://img.shields.io/badge/Releases-Legacy%20builds-5865F2?style=for-the-badge&logo=github" alt="Legacy development builds" /></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Source--available-2ea44f?style=for-the-badge" alt="Source-available license" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-2ea44f?style=for-the-badge" alt="MIT license" /></a>
 </p>
 
 > [!CAUTION]
@@ -174,9 +174,11 @@ Their licensing information is documented in [THIRD_PARTY.md](THIRD_PARTY.md) an
 
 ## License
 
-FH2VR is **source-available**, not OSI open source.
+FH2VR's own code and documentation are licensed under the **[MIT License](LICENSE)** (Copyright © 2026 Refilewski). You may use, modify, redistribute, and build upon this project, including commercially, provided that you retain the copyright and license notice in copies or substantial portions of the software.
 
-The [FH2VR Use-Only License 1.0](LICENSE) permits inspection, local compilation and personal use. Redistribution, publishing modified builds, incorporating FH2VR code into another project or distributing derivative implementations requires separate permission from Refilewski.
+**Project status is still abandoned.** MIT allows others to fork or maintain their own versions; it does **not** mean this repository is receiving updates, official support, or true stereo VR.
+
+Third-party components, including OpenVR, MinHook, and the FH2ML SDK header, retain their own license terms and required notices. See [THIRD_PARTY.md](THIRD_PARTY.md).
 
 ## Disclaimer
 
