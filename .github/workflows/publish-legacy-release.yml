@@ -1,0 +1,122 @@
+name: Publish legacy FH2VR build artifacts
+
+# This workflow republishes a successful existing Actions build to a legacy
+# release. It does not recompile the abandoned FH2VR project.
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Successful build workflow run ID on main"
+        required: true
+        type: string
+      release_tag:
+        description: "Existing prerelease tag to update"
+        required: true
+        default: dev-latest
+        type: string
+  push:
+    branches: [main]
+    paths: [.github/workflows/publish-legacy-release.yml]
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  publish:
+    if: github.event_name == 'workflow_dispatch' || github.event.head_commit.message == 'ci: publish MIT artifacts from run 41233157492'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RUN_ID: ${{ github.event_name == 'workflow_dispatch' && inputs.run_id || '41233157492' }}
+      TARGET_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || 'dev-latest' }}
+    steps:
+      - name: Checkout release repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Verify existing run and release
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$RUN_ID" =~ ^[0-9]{1,20}$ ]] || { echo "Invalid run ID"; exit 1; }
+          [[ "$TARGET_TAG" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] || { echo "Invalid tag"; exit 1; }
+          test "$TARGET_TAG" = "dev-latest" || { echo "Only the existing dev-latest archive release may be modified"; exit 1; }
+          gh release view "$TARGET_TAG" --repo "$GITHUB_REPOSITORY" --json tagName >/dev/null
+
+          state=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID" --jq '.conclusion')
+          branch=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID" --jq '.head_branch')
+          source_sha=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID" --jq '.head_sha')
+          if [[ "$state" != "success" || "$branch" != "main" || ! "$source_sha" =~ ^[a-f0-9]{40}$ ]]; then
+            echo "Expected a successful main-branch run (got $state / $branch / $source_sha)"
+            exit 1
+          fi
+          echo "SOURCE_SHA=$source_sha" >> "$GITHUB_ENV"
+
+      - name: Download the two original build artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifact-fh2ml artifact-standalone
+          gh run download "$RUN_ID" -R "$GITHUB_REPOSITORY" -n FH2VR-0.4.0-dev -D artifact-fh2ml
+          gh run download "$RUN_ID" -R "$GITHUB_REPOSITORY" -n FH2VR-Standalone-0.4.0-dev -D artifact-standalone
+          # Guard against republishing old source-available-license builds.
+          test -f artifact-fh2ml/FH2VR.dll
+          test -f artifact-fh2ml/LICENSE
+          test -f artifact-standalone/FH2VR.exe
+          test -f artifact-standalone/LICENSE
+          grep -q '^MIT License' artifact-fh2ml/LICENSE
+          grep -q '^MIT License' artifact-standalone/LICENSE
+          grep -q 'Copyright (c) 2026 Refilewski' artifact-fh2ml/LICENSE
+
+      - name: Package release ZIPs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          (cd artifact-fh2ml && zip -q -r ../release-assets/FH2VR-FH2ML-dev-latest.zip .)
+          (cd artifact-standalone && zip -q -r ../release-assets/FH2VR-Standalone-dev-latest.zip .)
+          unzip -Z1 release-assets/FH2VR-FH2ML-dev-latest.zip | grep -qx './LICENSE'
+          unzip -Z1 release-assets/FH2VR-Standalone-dev-latest.zip | grep -qx './LICENSE'
+          sha256sum release-assets/*.zip
+
+      - name: Replace existing dev-latest release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release upload "$TARGET_TAG" release-assets/FH2VR-FH2ML-dev-latest.zip release-assets/FH2VR-Standalone-dev-latest.zip --repo "$GITHUB_REPOSITORY" --clobber
+
+          cat > release-notes.md <<EOF
+          ## Abandoned / discontinued project
+
+          **FH2VR is no longer maintained.** This historical prototype outputs a **single monoscopic image**, not real stereoscopic VR. There are no planned fixes or compatibility updates. Azimuth's developers have indicated plans for VR support in a future Azimuth release; this project is separate.
+
+          ## Legacy builds — MIT licensed
+
+          - \`FH2VR-FH2ML-dev-latest.zip\` — historic FH2ML mod
+          - \`FH2VR-Standalone-dev-latest.zip\` — historic standalone Windows app
+
+          Both archives were packaged **without rebuilding** from the successful [GitHub Actions run #$RUN_ID](https://github.com/$GITHUB_REPOSITORY/actions/runs/$RUN_ID), source commit \`$SOURCE_SHA\`.
+
+          These packages include the **MIT LICENSE** and retain separate third-party notices. These are unsupported archival builds, not an official Azimuth VR release.
+          EOF
+          gh release edit "$TARGET_TAG" --repo "$GITHUB_REPOSITORY" --title "FH2VR — Abandoned (MIT, mono-only)" --notes-file release-notes.md --prerelease
+
+      - name: Point dev-latest tag at the source build commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git tag -f "$TARGET_TAG" "$SOURCE_SHA"
+          git push origin "refs/tags/$TARGET_TAG" --force
+
+      - name: Verify published release assets and source tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release view "$TARGET_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' > assets.txt
+          grep -qx 'FH2VR-FH2ML-dev-latest.zip' assets.txt
+          grep -qx 'FH2VR-Standalone-dev-latest.zip' assets.txt
+          actual=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TARGET_TAG" --jq '.object.sha')
+          test "$actual" = "$SOURCE_SHA"
+          echo "Published MIT builds from $SOURCE_SHA to $TARGET_TAG"
